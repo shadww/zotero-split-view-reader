@@ -7,7 +7,7 @@
 
 ---
 
-**Split-View Reader** is a plugin for [Zotero 8](https://www.zotero.org/) that enables split-view reading with synchronized controls.
+**Split-View Reader** is a plugin for [Zotero 8](https://www.zotero.org/) that enables split-view reading different PDFs with synchronized controls.
 
 <p align="center">
   <img src="doc/example.png" width="90%" alt="Example" />
@@ -39,13 +39,13 @@ Press `Shift + P` to open Zotero's command palette, then select **Split View Rea
 
 Right-click in either pane to access these options:
 
-| Option | Description |
-|--------|-------------|
-| **Close Split-View Reader** | Exit split-view mode |
-| **Primary Window** | Set current pane as the primary (sync source) |
-| **Open Another PDF** | Replace secondary pane with a different PDF |
-| **Swap PDFs** | Swap the PDFs between left and right panes |
-| **Sync Position & Zoom** | Manually sync position and zoom level |
+| Option                      | Description                                   |
+| --------------------------- | --------------------------------------------- |
+| **Close Split-View Reader** | Exit split-view mode                          |
+| **Primary Window**          | Set current pane as the primary (sync source) |
+| **Open Another PDF**        | Replace secondary pane with a different PDF   |
+| **Swap PDFs**               | Swap the PDFs between left and right panes    |
+| **Sync Position & Zoom**    | Manually sync position and zoom level         |
 
 <p align="left">
   <img src="doc/right-click1.png" width="18%" style="vertical-align: top" />
