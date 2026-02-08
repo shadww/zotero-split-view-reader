@@ -113,8 +113,8 @@ async function onPrefsEvent(type: string, data: { [key: string]: any }) {
 
 // Stub functions retained so examples.ts references still compile.
 // These are no-ops for the Split-View Reader plugin.
-function onShortcuts(_type: string) { }
-function onDialogEvents(_type: string) { }
+function onShortcuts(_type: string) {}
+function onDialogEvents(_type: string) {}
 
 // Add your hooks here. For element click, etc.
 // Keep in mind hooks only do dispatch. Don't add code that does real jobs in hooks.

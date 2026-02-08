@@ -36,7 +36,7 @@ function initZToolkit(_ztoolkit: ReturnType<typeof createZToolkit>) {
   const HEADLINE_ICON_DELAYS_MS = [50, 150, 300, 500, 800, 1200];
   (_ztoolkit as any).ProgressWindow = function (
     header: string,
-    options?: ConstructorParameters<typeof OriginalProgressWindow>[1]
+    options?: ConstructorParameters<typeof OriginalProgressWindow>[1],
   ) {
     const win = new OriginalProgressWindow(header, options);
     const origShow = win.show.bind(win);
