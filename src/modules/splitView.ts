@@ -641,6 +641,47 @@ export class SplitViewFactory {
       "splitViewSessionRestore",
       25,
     );
+
+    // Check for already-loaded split view tabs that may have been missed
+    // because they loaded before this listener was registered.
+    // This handles the case where a split view tab was selected when Zotero closed,
+    // causing it to load before the plugin's uiReadyPromise completed.
+    setTimeout(() => {
+      self.checkAlreadyLoadedSplitViewTabs();
+    }, 100);
+  }
+
+  /**
+   * Check for already-loaded split view tabs that may have been missed
+   * because they loaded before the session restore listener was registered.
+   */
+  private static async checkAlreadyLoadedSplitViewTabs() {
+    try {
+      const win = Zotero.getMainWindow();
+      const Zotero_Tabs = (win as any).Zotero_Tabs;
+
+      for (const tab of Zotero_Tabs._tabs) {
+        // Check loaded reader tabs (not unloaded) that have split view data
+        if (tab.type === "reader" && tab.data?.isSplitView) {
+          // Skip if already converted to split view
+          if (this.stateMap.has(tab.id)) continue;
+
+          Zotero.debug(
+            `Split view: Found already-loaded split view tab ${tab.id}, restoring...`,
+          );
+
+          try {
+            await this.restoreSplitViewFromSession(tab.id, tab.data);
+          } catch (e) {
+            Zotero.debug(
+              `Split view: Failed to restore split view for tab ${tab.id}: ${e}`,
+            );
+          }
+        }
+      }
+    } catch (e) {
+      Zotero.debug(`Split view: checkAlreadyLoadedSplitViewTabs failed: ${e}`);
+    }
   }
 
   /**
