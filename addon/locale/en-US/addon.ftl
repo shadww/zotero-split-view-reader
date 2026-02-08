@@ -10,7 +10,6 @@ prefs-table-detail = Detail
 tabpanel-lib-tab-label = Lib Tab
 tabpanel-reader-tab-label = Reader Tab
 splitview-menu-label = Split-View Reader
-splitview-select-pdf = Select PDF to display:
 splitview-dialog-title = Split View
 splitview-btn-open = Open
 splitview-btn-cancel = Cancel

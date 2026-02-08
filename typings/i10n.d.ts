@@ -43,7 +43,6 @@ export type FluentMessageId =
   | 'splitview-same-pdf-loaded'
   | 'splitview-searching'
   | 'splitview-select-first-pdf'
-  | 'splitview-select-pdf'
   | 'splitview-select-second-pdf'
   | 'splitview-set-primary'
   | 'splitview-swap-pdf'

@@ -61,6 +61,8 @@ interface SplitTabState {
   annotationItemIDs: number[]; // Track current PDF's annotation IDs for delete sync
   // requestAnimationFrame pending flag for scroll sync batching
   scrollSyncRAFPending: boolean;
+  // Last scroll sync timestamp for throttling (ms)
+  lastScrollSyncTime: number;
   // Resize debounce timer ID for cleanup
   resizeTimerId: number | null;
   // Full-screen overlay during resizer drag; removed on cleanup so UI is not stuck
@@ -321,8 +323,8 @@ export class SplitViewFactory {
 
       const edgeX = leftBrowserRect.right;
       const isNearEdge = Math.abs(e.clientX - edgeX) <= 15 &&
-                         e.clientY >= resizerRect.top &&
-                         e.clientY <= resizerRect.bottom;
+        e.clientY >= resizerRect.top &&
+        e.clientY <= resizerRect.bottom;
 
       if (isNearEdge) {
         onMouseDown(e);
@@ -532,7 +534,7 @@ export class SplitViewFactory {
     const self = this;
 
     // Override method
-    Zotero_Tabs.getTabIDByItemID = function(itemID: number) {
+    Zotero_Tabs.getTabIDByItemID = function (itemID: number) {
       // 1. Try original method first
       const tabID = this._originalGetTabIDByItemID.call(this, itemID);
       if (tabID) return tabID;
@@ -1545,6 +1547,7 @@ export class SplitViewFactory {
       isSyncingSelection: false,
       annotationItemIDs: [],
       scrollSyncRAFPending: false,
+      lastScrollSyncTime: 0,
       resizeTimerId: null,
       originalTitle,
     };
@@ -1820,6 +1823,7 @@ export class SplitViewFactory {
       isSyncingSelection: false,
       annotationItemIDs: item.getAnnotations().map((ann: any) => ann.id),
       scrollSyncRAFPending: false,
+      lastScrollSyncTime: 0,
       resizeTimerId: null,
       originalTitle,
     };
@@ -2286,22 +2290,22 @@ export class SplitViewFactory {
 
           if (type === "in") {
             if (className.includes("zoomin") || className.includes("zoom-in") ||
-                title.includes("zoom in") || ariaLabel.includes("zoom in") ||
-                title.includes("放大") || ariaLabel.includes("放大")) {
+              title.includes("zoom in") || ariaLabel.includes("zoom in") ||
+              title.includes("放大") || ariaLabel.includes("放大")) {
               return btn;
             }
           } else if (type === "out") {
             if (className.includes("zoomout") || className.includes("zoom-out") ||
-                title.includes("zoom out") || ariaLabel.includes("zoom out") ||
-                title.includes("缩小") || ariaLabel.includes("缩小")) {
+              title.includes("zoom out") || ariaLabel.includes("zoom out") ||
+              title.includes("缩小") || ariaLabel.includes("缩小")) {
               return btn;
             }
           } else {
             if (className.includes("zoomauto") || className.includes("zoom-auto") ||
-                className.includes("zoomreset") || className.includes("zoom-reset") ||
-                title.includes("zoom reset") || title.includes("reset zoom") ||
-                ariaLabel.includes("zoom reset") || ariaLabel.includes("reset zoom") ||
-                title.includes("重置") || ariaLabel.includes("重置")) {
+              className.includes("zoomreset") || className.includes("zoom-reset") ||
+              title.includes("zoom reset") || title.includes("reset zoom") ||
+              ariaLabel.includes("zoom reset") || ariaLabel.includes("reset zoom") ||
+              title.includes("重置") || ariaLabel.includes("重置")) {
               return btn;
             }
           }
@@ -2353,7 +2357,7 @@ export class SplitViewFactory {
 
     // Only sync from primary to secondary
     const isPrimary = (isLeft && state.primarySide === "left") ||
-                      (!isLeft && state.primarySide === "right");
+      (!isLeft && state.primarySide === "right");
     if (!isPrimary) return;
 
     // Skip if Ctrl is pressed (user doing Ctrl+wheel zoom shouldn't sync)
@@ -3197,7 +3201,7 @@ export class SplitViewFactory {
     // Determine if this is the primary browser
     const isLeft = sourceBrowser === state.leftBrowser;
     const isPrimary = (isLeft && state.primarySide === "left") ||
-                      (!isLeft && state.primarySide === "right");
+      (!isLeft && state.primarySide === "right");
 
     // Only sync from primary to secondary
     if (!isPrimary) return;
@@ -3265,7 +3269,7 @@ export class SplitViewFactory {
     // If not specified, we keep the currently active side (default behavior).
     let keepLeft = state.activeSide === "left";
     if (sideToClose) {
-        keepLeft = sideToClose === "right";
+      keepLeft = sideToClose === "right";
     }
     const keepItemID = keepLeft ? state.leftItemID : state.rightItemID;
 
@@ -3541,15 +3545,23 @@ export class SplitViewFactory {
 
       const self = this;
       const win = Zotero.getMainWindow();
+      // Minimum interval between scroll syncs (ms) for throttling
+      const SCROLL_SYNC_MIN_INTERVAL = 16; // ~60fps
 
       state.scrollHandler = () => {
         const s = self.stateMap.get(tabID);
         if (!s || s.isCleaningUp || s.scrollSyncRAFPending) return;
+
+        // Time-based throttling: skip if last sync was too recent
+        const now = Date.now();
+        if (now - s.lastScrollSyncTime < SCROLL_SYNC_MIN_INTERVAL) return;
+
         s.scrollSyncRAFPending = true;
         win.requestAnimationFrame(() => {
           const s2 = self.stateMap.get(tabID);
           if (!s2 || s2.isCleaningUp) return;
           s2.scrollSyncRAFPending = false;
+          s2.lastScrollSyncTime = Date.now();
           self.syncViews(tabID);
         });
       };
@@ -3716,7 +3728,7 @@ export class SplitViewFactory {
 
       // Safety check for dead objects (prevents InvisibleToDebugger errors)
       if (Components.utils.isDeadWrapper(browser) ||
-          Components.utils.isDeadWrapper(browser.contentWindow)) {
+        Components.utils.isDeadWrapper(browser.contentWindow)) {
         return;
       }
 
@@ -3760,7 +3772,7 @@ export class SplitViewFactory {
 
       // Skip injection if existing style already has identical content
       if (existingStyle && !Components.utils.isDeadWrapper(existingStyle)
-          && existingStyle.textContent === cssContent) {
+        && existingStyle.textContent === cssContent) {
         return;
       }
 
@@ -4040,18 +4052,18 @@ export class SplitViewFactory {
       // With Shift: key is "+" or "_"
       // Without Shift: key is "=" or "-"
       const isZoomIn = e.key === "+" || e.key === "=" ||
-                       e.code === "Equal" || e.code === "NumpadAdd";
+        e.code === "Equal" || e.code === "NumpadAdd";
       const isZoomOut = e.key === "-" || e.key === "_" ||
-                        e.code === "Minus" || e.code === "NumpadSubtract";
+        e.code === "Minus" || e.code === "NumpadSubtract";
 
       if (!isZoomIn && !isZoomOut) return;
 
       // Determine which browser has focus to check if it's primary
       const activeElement = win.document.activeElement;
       const leftBrowserFocused = s.leftBrowser.contains(activeElement) ||
-                                  s.leftBrowser === activeElement;
+        s.leftBrowser === activeElement;
       const rightBrowserFocused = s.rightBrowser.contains(activeElement) ||
-                                   s.rightBrowser === activeElement;
+        s.rightBrowser === activeElement;
 
       // If neither browser is focused, use activeSide
       let isLeft: boolean;
@@ -4064,7 +4076,7 @@ export class SplitViewFactory {
       }
 
       const isPrimary = (isLeft && s.primarySide === "left") ||
-                        (!isLeft && s.primarySide === "right");
+        (!isLeft && s.primarySide === "right");
       if (!isPrimary) return;
 
       // Sync zoom to secondary
@@ -4708,66 +4720,66 @@ export class SplitViewFactory {
           // 1. Check instantiated readers (Zotero.Reader._readers)
           const readers = (Zotero.Reader as any)._readers || [];
           for (const reader of readers) {
-             if (reader && reader.itemID) seenAttachmentIDs.add(reader.itemID);
+            if (reader && reader.itemID) seenAttachmentIDs.add(reader.itemID);
           }
 
           // 2. Check all tabs (including unloaded ones for lazy loading)
           const win = Zotero.getMainWindow();
           const Zotero_Tabs = (win as any).Zotero_Tabs || Zotero.getMainWindow().Zotero_Tabs;
           if (Zotero_Tabs) {
-             // Try to get tabs array - support both Zotero 6 and 7 patterns
-             const tabs = typeof Zotero_Tabs.getTabs === 'function'
-                ? Zotero_Tabs.getTabs()
-                : (Zotero_Tabs._tabs || []);
+            // Try to get tabs array - support both Zotero 6 and 7 patterns
+            const tabs = typeof Zotero_Tabs.getTabs === 'function'
+              ? Zotero_Tabs.getTabs()
+              : (Zotero_Tabs._tabs || []);
 
-             for (const tab of tabs) {
-                // Check for reader type, including unloaded tabs after Zotero restart
-                // Types: 'reader', 'reader-unloaded', 'reader-loading'
-                const isReaderTab = tab.type === "reader" ||
-                                    tab.type === "reader-unloaded" ||
-                                    tab.type === "reader-loading" ||
-                                    tab.type?.startsWith("reader") ||
-                                    tab.mode === "reader";
+            for (const tab of tabs) {
+              // Check for reader type, including unloaded tabs after Zotero restart
+              // Types: 'reader', 'reader-unloaded', 'reader-loading'
+              const isReaderTab = tab.type === "reader" ||
+                tab.type === "reader-unloaded" ||
+                tab.type === "reader-loading" ||
+                tab.type?.startsWith("reader") ||
+                tab.mode === "reader";
 
-                if (isReaderTab && tab.data && tab.data.itemID) {
-                   seenAttachmentIDs.add(tab.data.itemID);
-                } else if (isReaderTab) {
-                   // Fallback: try to get reader if initialized
-                   const r = Zotero.Reader.getByTabID(tab.id);
-                   if (r && r.itemID) seenAttachmentIDs.add(r.itemID);
-                }
-             }
+              if (isReaderTab && tab.data && tab.data.itemID) {
+                seenAttachmentIDs.add(tab.data.itemID);
+              } else if (isReaderTab) {
+                // Fallback: try to get reader if initialized
+                const r = Zotero.Reader.getByTabID(tab.id);
+                if (r && r.itemID) seenAttachmentIDs.add(r.itemID);
+              }
+            }
           }
 
           // 3. Convert Attachment IDs to Parent Items
           for (const attachmentID of seenAttachmentIDs) {
-              const attachment = Zotero.Items.get(attachmentID);
-              // Only consider attachments with parents (regular items)
-              if (attachment && attachment.parentID) {
-                  if (!seenParentIDs.has(attachment.parentID)) {
-                      const parent = Zotero.Items.get(attachment.parentID);
-                      if (parent) {
-                          itemsWithPDF.push(parent);
-                          seenParentIDs.add(attachment.parentID);
-                      }
-                  }
+            const attachment = Zotero.Items.get(attachmentID);
+            // Only consider attachments with parents (regular items)
+            if (attachment && attachment.parentID) {
+              if (!seenParentIDs.has(attachment.parentID)) {
+                const parent = Zotero.Items.get(attachment.parentID);
+                if (parent) {
+                  itemsWithPDF.push(parent);
+                  seenParentIDs.add(attachment.parentID);
+                }
               }
+            }
           }
 
           removeContainersAboveBase();
 
           if (itemsWithPDF.length === 0) {
-             // Show "no open pdf" message
-             const container = promptInstance.createCommandsContainer();
-             container.classList.add("suggestions");
-             const ele = ztoolkit.UI.createElement(win.document, "div", {
-                namespace: "html",
-                classList: ["command"],
-                styles: { opacity: "0.5", padding: "8px", textAlign: "center", cursor: "default" },
-                children: [{ tag: "span", properties: { innerText: getString("splitview-no-open-pdf") } }]
-             });
-             container.appendChild(ele);
-             return;
+            // Show "no open pdf" message
+            const container = promptInstance.createCommandsContainer();
+            container.classList.add("suggestions");
+            const ele = ztoolkit.UI.createElement(win.document, "div", {
+              namespace: "html",
+              classList: ["command"],
+              styles: { opacity: "0.5", padding: "8px", textAlign: "center", cursor: "default" },
+              children: [{ tag: "span", properties: { innerText: getString("splitview-no-open-pdf") } }]
+            });
+            container.appendChild(ele);
+            return;
           }
 
           buildItemList(promptInstance, itemsWithPDF);
@@ -4808,13 +4820,13 @@ export class SplitViewFactory {
 
         const filtered = text.trim()
           ? currentPDFs.filter((pdf: Zotero.Item) => {
-              const title = String(
-                pdf.getField("title") ||
-                  (pdf as any).attachmentFilename ||
-                  "",
-              );
-              return title.toLowerCase().includes(text.toLowerCase());
-            })
+            const title = String(
+              pdf.getField("title") ||
+              (pdf as any).attachmentFilename ||
+              "",
+            );
+            return title.toLowerCase().includes(text.toLowerCase());
+          })
           : currentPDFs;
 
         // Remove existing PDF container (the last one, beyond base + items)
@@ -4876,7 +4888,7 @@ export class SplitViewFactory {
           promptInstance.inputNode.value = "";
           (promptInstance as any).lastInputText = "";
           promptInstance.inputNode.placeholder =
-            placeholder || getString("splitview-select-pdf");
+            placeholder || getString("splitview-select-second-pdf");
           promptInstance.inputNode.focus();
           return;
         }
@@ -5043,8 +5055,8 @@ export class SplitViewFactory {
         pdfs.forEach((pdf: Zotero.Item) => {
           const pdfTitle = String(
             pdf.getField("title") ||
-              (pdf as any).attachmentFilename ||
-              "PDF",
+            (pdf as any).attachmentFilename ||
+            "PDF",
           );
 
           const ele = ztoolkit.UI.createElement(win.document, "div", {
@@ -5114,7 +5126,7 @@ export class SplitViewFactory {
       promptInstance.inputNode.value = "";
       (promptInstance as any).lastInputText = "";
       promptInstance.inputNode.placeholder =
-        placeholder || getString("splitview-select-pdf");
+        placeholder || getString("splitview-select-second-pdf");
       promptInstance.inputNode.focus();
 
       // Run initial search to populate the item list
