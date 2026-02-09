@@ -15,7 +15,7 @@
 
 ## Features
 
-- **Split-View Mode**: View the same PDF document in two synchronized panes side by side
+- **Split-View Mode**: View same/different PDF document in two synchronized panes side by side
 - **Synchronized Scrolling**: Scroll both views simultaneously for seamless reading
 - **Independent Navigation**: Each pane can also be navigated independently when needed
 - **Seamless Integration**: Works naturally within Zotero's reader interface
