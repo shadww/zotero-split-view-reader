@@ -1,5 +1,41 @@
 import { config } from "../../package.json";
+import { SplitViewFactory } from "./splitView";
 import { getPref, setPref } from "../utils/prefs";
+import type { SplitTabsTitleMode } from "../utils/splitTabTitle";
+
+function isSplitTabsTitleMode(value: string): value is SplitTabsTitleMode {
+  return (
+    value === "titleCreatorYear" ||
+    value === "creatorYearTitle" ||
+    value === "attachmentTitle" ||
+    value === "filename"
+  );
+}
+
+function syncSplitTabsTitleMenulist(doc: Document, mode: SplitTabsTitleMode) {
+  const menulist = doc.querySelector(
+    `#zotero-prefpane-${config.addonRef}-split-tabs-title`,
+  ) as
+    | (Element & {
+        value: string;
+        selectedItem?: Element | null;
+        setAttribute(name: string, value: string): void;
+      })
+    | null;
+  if (!menulist) return;
+
+  menulist.value = mode;
+  const selectedItem = doc.querySelector(
+    `#zotero-prefpane-${config.addonRef}-split-tabs-title menuitem[value="${mode}"]`,
+  ) as Element | null;
+  if (selectedItem) {
+    menulist.selectedItem = selectedItem;
+    const label = selectedItem.getAttribute("label");
+    if (label) {
+      menulist.setAttribute("label", label);
+    }
+  }
+}
 
 export async function registerPrefsScripts(_window: Window) {
   // This function is called when the prefs window is opened
@@ -18,6 +54,12 @@ export async function registerPrefsScripts(_window: Window) {
 function updatePrefsUI() {
   if (!addon.data.prefs?.window) return;
   const doc = addon.data.prefs.window.document;
+
+  const mode = getPref("splitTabsTitle");
+  syncSplitTabsTitleMenulist(
+    doc,
+    isSplitTabsTitleMode(mode) ? mode : "filename",
+  );
 
   // Initialize color preview with current pref values
   updateColorPreview(doc);
@@ -43,6 +85,17 @@ function bindPrefEvents() {
   syncEnabledCheckbox?.addEventListener("command", (e: Event) => {
     const target = e.target as HTMLInputElement;
     setPref("syncEnabled", target.checked);
+  });
+
+  const splitTabsTitleMenulist = doc.querySelector(
+    `#zotero-prefpane-${config.addonRef}-split-tabs-title`,
+  ) as (Element & { value: SplitTabsTitleMode }) | null;
+  splitTabsTitleMenulist?.addEventListener("command", (e: Event) => {
+    const target = e.target as Element & { value: string };
+    const mode = isSplitTabsTitleMode(target.value) ? target.value : "filename";
+    setPref("splitTabsTitle", mode);
+    syncSplitTabsTitleMenulist(doc, mode);
+    SplitViewFactory.refreshOpenSplitViewTabTitles();
   });
 
   // RGB inputs: Primary scrollbar color

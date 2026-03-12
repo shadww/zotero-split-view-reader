@@ -9,6 +9,7 @@ declare namespace _ZoteroTypes {
     PluginPrefsMap: {
       "followFocusPrimary": boolean;
       "syncEnabled": boolean;
+      "splitTabsTitle": string;
       "primaryScrollbarR": number;
       "primaryScrollbarG": number;
       "primaryScrollbarB": number;

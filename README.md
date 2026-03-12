@@ -39,13 +39,14 @@ Press `Shift + P` to open Zotero's command palette, then select **Split View Rea
 
 Right-click in either pane to access these options:
 
-| Option                      | Description                                   |
-| --------------------------- | --------------------------------------------- |
-| **Close Split-View Reader** | Exit split-view mode                          |
-| **Primary Window**          | Set current pane as the primary (sync source) |
-| **Open Another PDF**        | Replace secondary pane with a different PDF   |
-| **Swap PDFs**               | Swap the PDFs between left and right panes    |
-| **Sync Position & Zoom**    | Manually sync position and zoom level         |
+| Option                      | Description                                      |
+| --------------------------- | ------------------------------------------------ |
+| **Close Split-View Reader** | Exit split-view mode                             |
+| **Separate Views**          | Restore the split readers as regular Zotero tabs |
+| **Primary Window**          | Set current pane as the primary (sync source)    |
+| **Open Another PDF**        | Replace secondary pane with a different PDF      |
+| **Swap PDFs**               | Swap the PDFs between left and right panes       |
+| **Sync Position & Zoom**    | Manually sync position and zoom level            |
 
 <p align="left">
   <img src="doc/right-click1.png" width="18%" style="vertical-align: top" />
@@ -55,5 +56,9 @@ Right-click in either pane to access these options:
 ### Settings
 
 Go to `Edit` → `Settings` → Click Split-View Reader to configure:
+
+- **Show Split Tabs as**: Choose how split-view tab titles are displayed without affecting normal Zotero tabs
+- **Follow mouse focus to switch primary window**: Automatically switch the sync source when focus changes
+- **Actions Sync**: Control whether scroll and page navigation stay synchronized
 
 <img src="doc/svreader-setting.png" width="80%" alt="Settings" />

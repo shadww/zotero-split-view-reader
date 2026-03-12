@@ -1,6 +1,10 @@
 import { config } from "../../package.json";
 import { getString } from "../utils/locale";
 import { getPref } from "../utils/prefs";
+import {
+  getSplitViewTabTitleForItems,
+  type SplitTabsTitleMode,
+} from "../utils/splitTabTitle";
 
 /**
  * Split View Tab - Single tab with two side-by-side PDF readers.
@@ -69,6 +73,13 @@ interface SplitTabState {
   dragOverlay?: HTMLElement | null;
 }
 
+interface SeparateViewTarget {
+  itemID: number;
+  tabID: string | null;
+  viewState: any;
+  side: "left" | "right";
+}
+
 /** Command id for the Split-View Reader prompt command; used for unregister to avoid leaks. */
 const SPLIT_VIEW_PROMPT_COMMAND_ID = "split-view-reader";
 
@@ -87,6 +98,8 @@ export class SplitViewFactory {
     null,
     null,
   ];
+  /** Preference observer ID for split tab titles - renames open split view tabs */
+  private static splitTabsTitlePrefObserverID: symbol | null = null;
 
   /**
    * Look up state for a specific tab
@@ -110,6 +123,84 @@ export class SplitViewFactory {
       // Ignore errors
     }
     return null;
+  }
+
+  /**
+   * Get the configured split tab title mode.
+   */
+  private static getSplitTabsTitleMode(): SplitTabsTitleMode {
+    const mode = getPref("splitTabsTitle");
+    if (
+      mode === "titleCreatorYear" ||
+      mode === "creatorYearTitle" ||
+      mode === "attachmentTitle" ||
+      mode === "filename"
+    ) {
+      return mode;
+    }
+    return "filename";
+  }
+
+  /**
+   * Rename a split-view tab using the plugin-specific tab title mode.
+   */
+  private static async renameSplitViewTab(tabID: string): Promise<void> {
+    const state = this.stateMap.get(tabID);
+    if (!state || state.isCleaningUp) return;
+
+    try {
+      const leftItem = Zotero.Items.get(state.leftItemID);
+      const rightItem = Zotero.Items.get(state.rightItemID);
+      if (!leftItem || !rightItem) return;
+
+      const title = await getSplitViewTabTitleForItems(
+        leftItem,
+        rightItem,
+        this.getSplitTabsTitleMode(),
+      );
+      const win = Zotero.getMainWindow();
+      const Zotero_Tabs = (win as any).Zotero_Tabs;
+      await Zotero_Tabs.rename(tabID, title);
+    } catch (e) {
+      Zotero.debug(`Split view: renameSplitViewTab failed: ${e}`);
+    }
+  }
+
+  /**
+   * Rename all currently open split-view tabs.
+   */
+  private static async renameAllSplitViewTabs(): Promise<void> {
+    for (const tabID of this.stateMap.keys()) {
+      await this.renameSplitViewTab(tabID);
+    }
+  }
+
+  /**
+   * Build the title for a split-view tab from stored tab data.
+   */
+  private static async getSplitViewTitleForTab(tab: any): Promise<string> {
+    const leftItemID = tab?.data?.leftItemID ?? tab?.data?.itemID;
+    const rightItemID =
+      tab?.data?.rightItemID ?? tab?.data?.leftItemID ?? tab?.data?.itemID;
+    const leftItem = leftItemID ? Zotero.Items.get(leftItemID) : null;
+    const rightItem = rightItemID ? Zotero.Items.get(rightItemID) : null;
+    if (!leftItem || !rightItem) {
+      return "";
+    }
+
+    return getSplitViewTabTitleForItems(
+      leftItem,
+      rightItem,
+      this.getSplitTabsTitleMode(),
+    );
+  }
+
+  /**
+   * Refresh titles of all open split-view tabs.
+   * Mirrors Zotero's native reader tab-title refresh behavior.
+   */
+  static refreshOpenSplitViewTabTitles(): void {
+    void this.renameAllSplitViewTabs();
   }
 
   /**
@@ -492,6 +583,23 @@ export class SplitViewFactory {
         if (isInSplitView && tabState) {
           // Determine which side this reader is on
           const currentSide = this.getReaderSide(readerTabID, reader as any);
+          const getClickedSide = () => {
+            const s = this.stateMap.get(readerTabID);
+            if (!s || s.isCleaningUp) return null;
+            return currentSide || s.activeSide || null;
+          };
+
+          menuItems.push({
+            label: getString("splitview-separate-views"),
+            onCommand: () => {
+              const clickedSide = getClickedSide();
+              if (clickedSide) {
+                this.separateViews(readerTabID, clickedSide);
+              }
+            },
+          });
+          iconMap[getString("splitview-separate-views")] =
+            this.getIconURI("separate_24dp.svg");
 
           // Second item: "Primary Window" (icon replaces checkmark)
           menuItems.push({
@@ -566,6 +674,10 @@ export class SplitViewFactory {
       (Zotero_Tabs as any)._originalGetTabIDByItemID =
         Zotero_Tabs.getTabIDByItemID;
     }
+    if (!(Zotero_Tabs as any)._originalReaderGetTitleHook) {
+      (Zotero_Tabs as any)._originalReaderGetTitleHook =
+        Zotero_Tabs.tabHooks?.getTitle?.reader;
+    }
 
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;
@@ -591,6 +703,17 @@ export class SplitViewFactory {
 
       return null;
     };
+
+    if (Zotero_Tabs.tabHooks?.getTitle?.reader) {
+      Zotero_Tabs.tabHooks.getTitle.reader = async function (tab: any) {
+        if (tab?.data?.isSplitView) {
+          return self.getSplitViewTitleForTab(tab);
+        }
+
+        const original = (Zotero_Tabs as any)._originalReaderGetTitleHook;
+        return typeof original === "function" ? original.call(this, tab) : "";
+      };
+    }
   }
 
   /**
@@ -733,6 +856,14 @@ export class SplitViewFactory {
       );
       this.scrollbarPrefObserverIDs[i] = id;
     });
+
+    this.splitTabsTitlePrefObserverID = Zotero.Prefs.registerObserver(
+      `${prefix}.splitTabsTitle`,
+      () => {
+        this.refreshOpenSplitViewTabTitles();
+      },
+      true,
+    );
   }
 
   /**
@@ -872,6 +1003,16 @@ export class SplitViewFactory {
         this.scrollbarPrefObserverIDs[i] = null;
       }
     });
+    if (this.splitTabsTitlePrefObserverID) {
+      try {
+        Zotero.Prefs.unregisterObserver(this.splitTabsTitlePrefObserverID);
+      } catch (e) {
+        Zotero.debug(
+          `Split view: unregisterAll - unregisterObserver(splitTabsTitle) failed: ${e}`,
+        );
+      }
+      this.splitTabsTitlePrefObserverID = null;
+    }
 
     // Restore Zotero_Tabs.getTabIDByItemID to avoid holding references and stale tab IDs
     this.unregisterTabLookup();
@@ -899,6 +1040,14 @@ export class SplitViewFactory {
       if (typeof original === "function") {
         Zotero_Tabs.getTabIDByItemID = original;
         (Zotero_Tabs as any)._originalGetTabIDByItemID = undefined;
+      }
+      const originalGetTitle = (Zotero_Tabs as any)._originalReaderGetTitleHook;
+      if (
+        typeof originalGetTitle === "function" &&
+        Zotero_Tabs.tabHooks?.getTitle
+      ) {
+        Zotero_Tabs.tabHooks.getTitle.reader = originalGetTitle;
+        (Zotero_Tabs as any)._originalReaderGetTitleHook = undefined;
       }
     } catch (e) {
       Zotero.debug(`Split view: unregisterTabLookup failed: ${e}`);
@@ -1285,24 +1434,7 @@ export class SplitViewFactory {
       // Update tab data
       this.updateTabDataForSession(tabID);
 
-      // Update tab title
-      const Zotero_Tabs = (win as any).Zotero_Tabs;
-      const leftItem = Zotero.Items.get(state.leftItemID);
-      const rightItem = Zotero.Items.get(state.rightItemID);
-      const leftTitle = String(leftItem.getField("title") || "PDF").substring(
-        0,
-        50,
-      );
-      const rightTitle = String(rightItem.getField("title") || "PDF").substring(
-        0,
-        50,
-      );
-
-      if (state.isSamePDF) {
-        Zotero_Tabs.rename(tabID, `${leftTitle}`);
-      } else {
-        Zotero_Tabs.rename(tabID, `${leftTitle} | ${rightTitle}`);
-      }
+      await this.renameSplitViewTab(tabID);
 
       // Restart sync if it was enabled
       if (wasSyncEnabled) {
@@ -1459,19 +1591,7 @@ export class SplitViewFactory {
 
       // 13. Update tab data and title
       this.updateTabDataForSession(tabID);
-
-      const Zotero_Tabs = (win as any).Zotero_Tabs;
-      const leftTitle = String(
-        newLeftItem.getField("title") || "PDF",
-      ).substring(0, 50);
-      const rightTitle = String(
-        newRightItem.getField("title") || "PDF",
-      ).substring(0, 50);
-      if (state.isSamePDF) {
-        Zotero_Tabs.rename(tabID, `${leftTitle}`);
-      } else {
-        Zotero_Tabs.rename(tabID, `${leftTitle} | ${rightTitle}`);
-      }
+      await this.renameSplitViewTab(tabID);
 
       // 14. Restart sync if it was enabled
       if (wasSyncEnabled) {
@@ -1611,16 +1731,7 @@ export class SplitViewFactory {
     (newContainer as any).style.height = "100%";
     (newContainer as any).style.overflow = "hidden";
 
-    // 6. Get item info for tab title
-    const leftTitle = String(leftItem.getField("title") || "PDF 1").substring(
-      0,
-      30,
-    );
-    const rightTitle = String(
-      secondaryPDF.getField("title") || "PDF 2",
-    ).substring(0, 30);
-
-    // 7. Build split view layout
+    // 6. Build split view layout
     const mainHbox = win.document.createXULElement("hbox") as XULElement;
     (mainHbox as any).style.display = "flex";
     (mainHbox as any).style.flexDirection = "row";
@@ -1882,8 +1993,7 @@ export class SplitViewFactory {
         splitRatio: newState.splitRatio,
         syncEnabled: newState.syncEnabled,
       });
-      // Different-PDF split view: show "Name1 | Name2" without extra prefix.
-      Zotero_Tabs.rename(tabID, `${leftTitle} | ${rightTitle}`);
+      await this.renameSplitViewTab(tabID);
     } catch (e) {
       this.cleanupTab(tabID);
       throw e;
@@ -1952,11 +2062,7 @@ export class SplitViewFactory {
     (newContainer as any).style.height = "100%";
     (newContainer as any).style.overflow = "hidden";
 
-    // 5. Get item info for tab title (for potential use), but we will
-    //    keep the original tab title when splitting the same PDF.
-    const title = String(item.getField("title") || "PDF").substring(0, 50);
-
-    // 6. Build split view layout
+    // 5. Build split view layout
     const mainHbox = win.document.createXULElement("hbox") as XULElement;
     (mainHbox as any).style.display = "flex";
     (mainHbox as any).style.flexDirection = "row";
@@ -2220,9 +2326,7 @@ export class SplitViewFactory {
         500,
       );
 
-      // 9. Update tab data (include split view state for session restore).
-      //    For same-PDF split view we intentionally DO NOT change the tab title,
-      //    so that the label stays exactly as the original reader tab.
+      // 9. Update tab data and title for session restore.
       Zotero_Tabs.setTabData(tabID, {
         itemID: itemID,
         leftItemID: itemID,
@@ -2232,6 +2336,7 @@ export class SplitViewFactory {
         splitRatio: newState.splitRatio,
         syncEnabled: newState.syncEnabled,
       });
+      await this.renameSplitViewTab(tabID);
     } catch (e) {
       this.cleanupTab(tabID);
       throw e;
@@ -3338,6 +3443,129 @@ export class SplitViewFactory {
   }
 
   /**
+   * Find an already-open ordinary reader tab for an attachment item.
+   * Split-view tabs are explicitly excluded from reuse.
+   */
+  private static findReusableReaderTabID(
+    itemID: number,
+    excludedTabIDs: Set<string> = new Set(),
+  ): string | null {
+    try {
+      const win = Zotero.getMainWindow();
+      const Zotero_Tabs = (win as any).Zotero_Tabs;
+      const tabs =
+        typeof Zotero_Tabs?.getTabs === "function"
+          ? Zotero_Tabs.getTabs()
+          : Zotero_Tabs?._tabs || [];
+
+      for (const tab of tabs) {
+        if (!tab?.id || excludedTabIDs.has(tab.id)) continue;
+        if (tab.data?.isSplitView) continue;
+        const isReaderTab =
+          tab.type === "reader" ||
+          tab.type === "reader-unloaded" ||
+          tab.type === "reader-loading" ||
+          tab.type?.startsWith("reader") ||
+          tab.mode === "reader";
+        if (isReaderTab && tab.data?.itemID === itemID) {
+          return tab.id;
+        }
+      }
+    } catch (e) {
+      Zotero.debug(`Split view: findReusableReaderTabID error: ${e}`);
+    }
+    return null;
+  }
+
+  /**
+   * Wait until a tab has a live reader instance.
+   */
+  private static async waitForReaderByTabID(
+    tabID: string,
+    maxWaitMs = 10000,
+  ): Promise<any | null> {
+    const start = Date.now();
+    let reader = Zotero.Reader.getByTabID(tabID);
+    while (!reader && Date.now() - start < maxWaitMs) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      reader = Zotero.Reader.getByTabID(tabID);
+    }
+    if (!reader) return null;
+    await this.waitForReaderReady(reader, maxWaitMs);
+    return reader;
+  }
+
+  /**
+   * Apply a captured primary view state to a standard reader tab.
+   */
+  private static async applyViewStateToReader(
+    reader: any,
+    viewState: any,
+  ): Promise<void> {
+    if (!reader || !viewState) return;
+
+    try {
+      const targetPrimaryView = reader._internalReader?._primaryView;
+      if (!targetPrimaryView?._setState) return;
+
+      const stateToApply: Record<string, any> = {
+        pageIndex: viewState.pageIndex ?? 0,
+        scale: viewState.scale,
+      };
+      if (viewState.top !== undefined) {
+        stateToApply.top = viewState.top;
+      }
+      if (viewState.left !== undefined) {
+        stateToApply.left = viewState.left;
+      }
+      if (Number.isInteger(viewState.scrollMode)) {
+        stateToApply.scrollMode = viewState.scrollMode;
+      }
+      if (Number.isInteger(viewState.spreadMode)) {
+        stateToApply.spreadMode = viewState.spreadMode;
+      }
+
+      let clonedState = stateToApply;
+      try {
+        const targetWin =
+          targetPrimaryView._iframeWindow || reader._iframeWindow || null;
+        if (targetWin) {
+          clonedState = Components.utils.cloneInto(stateToApply, targetWin, {
+            wrapReflectors: true,
+          });
+        }
+      } catch (e) {
+        Zotero.debug(
+          `Split view: applyViewStateToReader cloneInto failed: ${e}`,
+        );
+      }
+
+      await targetPrimaryView._setState(clonedState);
+    } catch (e) {
+      Zotero.debug(`Split view: applyViewStateToReader failed: ${e}`);
+    }
+  }
+
+  /**
+   * Restore a standard reader tab and force it to the desired split-view state.
+   */
+  private static async restoreSeparateViewTarget(
+    tabID: string,
+    viewState: any,
+  ): Promise<void> {
+    try {
+      const win = Zotero.getMainWindow();
+      const Zotero_Tabs = (win as any).Zotero_Tabs;
+      Zotero_Tabs.select(tabID);
+      const reader = await this.waitForReaderByTabID(tabID);
+      if (!reader) return;
+      await this.applyViewStateToReader(reader, viewState);
+    } catch (e) {
+      Zotero.debug(`Split view: restoreSeparateViewTarget failed: ${e}`);
+    }
+  }
+
+  /**
    * Open context menu for a reader
    */
   private static openContextMenu(
@@ -3428,6 +3656,14 @@ export class SplitViewFactory {
         this.revertToSingleReader(capturedTabID, currentSide);
       });
       popup.appendChild(closeItem);
+
+      const separateItem = mainWindow.document.createXULElement("menuitem");
+      separateItem.setAttribute("label", getString("splitview-separate-views"));
+      this.setMenuItemIcon(separateItem, this.getIconURI("separate_24dp.svg"));
+      separateItem.addEventListener("command", () => {
+        this.separateViews(capturedTabID, currentSide);
+      });
+      popup.appendChild(separateItem);
 
       // Set Primary (right below Split-View Reader)
       const primaryItem = mainWindow.document.createXULElement("menuitem");
@@ -3702,6 +3938,130 @@ export class SplitViewFactory {
     }, 200);
 
     state.sidebarToggleTimers.push(timerId);
+  }
+
+  /**
+   * Revert split view to single reader
+   * Called when user unchecks "Split-View Reader" in context menu
+   * Keeps the focused reader and closes the other one
+   * @param sideToClose Optional. If provided, closes this specific side. If not, keeps active side.
+   */
+  private static async separateViews(
+    tabID: string,
+    clickedSide: "left" | "right",
+  ) {
+    const state = this.stateMap.get(tabID);
+    if (!state || state.isCleaningUp) return;
+
+    state.isCleaningUp = true;
+
+    const win = Zotero.getMainWindow();
+    const Zotero_Tabs = (win as any).Zotero_Tabs;
+    const { tabIndex } = Zotero_Tabs._getTab(tabID);
+
+    const leftCurrentState =
+      this.getCurrentViewStateFromBrowser(state.leftBrowser) ||
+      state.leftViewState;
+    const rightCurrentState =
+      this.getCurrentViewStateFromBrowser(state.rightBrowser) ||
+      state.rightViewState;
+
+    try {
+      if (state.isSamePDF) {
+        const keepState =
+          clickedSide === "left" ? leftCurrentState : rightCurrentState;
+        await this.saveViewStateToDisk(state.leftItemID, keepState);
+      } else {
+        await Promise.all([
+          this.saveViewStateToDisk(state.leftItemID, leftCurrentState),
+          this.saveViewStateToDisk(state.rightItemID, rightCurrentState),
+        ]);
+      }
+    } catch (e) {
+      Zotero.debug(`Split view: separateViews save state failed: ${e}`);
+    }
+
+    const excludedTabIDs = new Set<string>([tabID]);
+    const targets: SeparateViewTarget[] = state.isSamePDF
+      ? [
+          {
+            itemID: state.leftItemID,
+            tabID: this.findReusableReaderTabID(
+              state.leftItemID,
+              excludedTabIDs,
+            ),
+            viewState:
+              clickedSide === "left" ? leftCurrentState : rightCurrentState,
+            side: clickedSide,
+          },
+        ]
+      : [
+          {
+            itemID: state.leftItemID,
+            tabID: this.findReusableReaderTabID(
+              state.leftItemID,
+              excludedTabIDs,
+            ),
+            viewState: leftCurrentState,
+            side: "left",
+          },
+          {
+            itemID: state.rightItemID,
+            tabID: this.findReusableReaderTabID(
+              state.rightItemID,
+              excludedTabIDs,
+            ),
+            viewState: rightCurrentState,
+            side: "right",
+          },
+        ];
+
+    this.cleanupTabResources(tabID);
+    Zotero_Tabs.close(tabID);
+
+    for (let i = 0; i < targets.length; i++) {
+      const target = targets[i];
+      const targetIndex = tabIndex + i;
+
+      if (target.tabID) {
+        try {
+          Zotero_Tabs.move(target.tabID, targetIndex);
+        } catch (e) {
+          Zotero.debug(`Split view: separateViews move tab failed: ${e}`);
+        }
+        continue;
+      }
+
+      const reader = await Zotero.Reader.open(target.itemID, undefined, {
+        tabIndex: targetIndex,
+        openInBackground: true,
+        allowDuplicate: true,
+      });
+      target.tabID = reader?.tabID || null;
+    }
+
+    for (const target of targets) {
+      if (!target.tabID) continue;
+      await this.restoreSeparateViewTarget(target.tabID, target.viewState);
+    }
+
+    const finalTarget = state.isSamePDF
+      ? targets[0]
+      : targets.find((target) => target.side === clickedSide) || targets[0];
+    if (finalTarget?.tabID) {
+      Zotero_Tabs.select(finalTarget.tabID);
+    }
+
+    const popup = new ztoolkit.ProgressWindow(addon.data.config.addonName, {
+      closeOnClick: true,
+    })
+      .createLine({
+        text: getString("splitview-closed"),
+        type: "default",
+        icon: `chrome://${config.addonRef}/content/icons/svreader.svg`,
+      })
+      .show();
+    popup.startCloseTimer(2000);
   }
 
   /**

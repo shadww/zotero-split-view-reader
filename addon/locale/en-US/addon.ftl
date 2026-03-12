@@ -27,6 +27,7 @@ splitview-closed = Split view closed
 splitview-same-pdf-loaded = Same PDF split view loaded
 splitview-sync-position = Sync Position & Zoom
 splitview-position-synced = Position and zoom synced
+splitview-separate-views = Separate Views
 splitview-open-another = Open Another PDF
 splitview-swap-pdf = Swap PDFs
 splitview-command-label = Split View Reader
