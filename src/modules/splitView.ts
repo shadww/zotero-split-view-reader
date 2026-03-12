@@ -3496,6 +3496,41 @@ export class SplitViewFactory {
   }
 
   /**
+   * Wait until a Zotero tab and its reader instance are fully gone.
+   */
+  private static async waitForTabClosed(
+    tabID: string,
+    maxWaitMs = 3000,
+  ): Promise<void> {
+    const start = Date.now();
+    while (Date.now() - start < maxWaitMs) {
+      const win = Zotero.getMainWindow();
+      const Zotero_Tabs = (win as any)?.Zotero_Tabs;
+      const reader = Zotero.Reader.getByTabID(tabID);
+      let tab: any = null;
+      try {
+        tab = Zotero_Tabs?._getTab(tabID)?.tab || null;
+      } catch {
+        tab = null;
+      }
+      if (!reader && !tab) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
+  /**
+   * Let the embedded split readers flush debounced view-state callbacks before
+   * the browsers are unloaded and standard readers are reopened.
+   */
+  private static async waitForSplitViewToSettle(): Promise<void> {
+    // Zotero reader debounces view-state updates at 300ms. Keep a small margin
+    // so the final scroll callback reliably lands before cleanup starts.
+    await new Promise((resolve) => setTimeout(resolve, 350));
+  }
+
+  /**
    * Apply a captured primary view state to a standard reader tab.
    */
   private static async applyViewStateToReader(
@@ -3547,22 +3582,129 @@ export class SplitViewFactory {
   }
 
   /**
-   * Restore a standard reader tab and force it to the desired split-view state.
+   * Wait for a standard reader tab to finish background loading and apply the
+   * desired view state without selecting it.
    */
   private static async restoreSeparateViewTarget(
     tabID: string,
     viewState: any,
   ): Promise<void> {
     try {
-      const win = Zotero.getMainWindow();
-      const Zotero_Tabs = (win as any).Zotero_Tabs;
-      Zotero_Tabs.select(tabID);
       const reader = await this.waitForReaderByTabID(tabID);
       if (!reader) return;
       await this.applyViewStateToReader(reader, viewState);
     } catch (e) {
       Zotero.debug(`Split view: restoreSeparateViewTarget failed: ${e}`);
     }
+  }
+
+  /**
+   * Reuse or create a normal reader tab in the background, then restore the
+   * split-view state without switching focus to it.
+   */
+  private static async prepareSeparateViewTarget(
+    target: SeparateViewTarget,
+    tabIndex: number,
+    activate = false,
+  ): Promise<void> {
+    const win = Zotero.getMainWindow();
+    const Zotero_Tabs = (win as any).Zotero_Tabs;
+
+    const selectTargetIfNeeded = () => {
+      if (!activate || !target.tabID) return;
+      if (Zotero_Tabs.selectedID !== target.tabID) {
+        Zotero_Tabs.select(target.tabID);
+      }
+    };
+
+    const openTarget = async (
+      title?: string,
+    ): Promise<void> => {
+      const reader = await Zotero.Reader.open(target.itemID, undefined, {
+        title,
+        tabIndex,
+        openInBackground: !activate,
+        allowDuplicate: true,
+      });
+      target.tabID = reader?.tabID || null;
+      if (!target.tabID) return;
+      selectTargetIfNeeded();
+      // Fresh reader tabs usually restore from `.zotero-reader-state` during
+      // open, but still reapply the captured in-memory state as a fallback in
+      // case disk persistence failed.
+      await this.restoreSeparateViewTarget(target.tabID, target.viewState);
+    };
+
+    if (!target.tabID) {
+      await openTarget();
+      return;
+    }
+
+    let tab: any = null;
+    try {
+      ({ tab } = Zotero_Tabs._getTab(target.tabID));
+    } catch (e) {
+      Zotero.debug(`Split view: prepareSeparateViewTarget get tab failed: ${e}`);
+    }
+
+    if (!tab) {
+      target.tabID = null;
+      await openTarget();
+      return;
+    }
+
+    const existingTabID = target.tabID;
+    const existingTitle = tab.title;
+
+    try {
+      Zotero_Tabs.move(existingTabID, tabIndex);
+    } catch (e) {
+      Zotero.debug(`Split view: separateViews move tab failed: ${e}`);
+    }
+
+    const liveReader = Zotero.Reader.getByTabID(existingTabID);
+    if (liveReader) {
+      target.tabID = existingTabID;
+      selectTargetIfNeeded();
+      await this.waitForReaderReady(liveReader);
+      await this.applyViewStateToReader(liveReader, target.viewState);
+      return;
+    }
+
+    let refreshedTab = tab;
+    try {
+      refreshedTab = Zotero_Tabs._getTab(existingTabID).tab || tab;
+    } catch (e) {
+      Zotero.debug(
+        `Split view: prepareSeparateViewTarget refresh tab failed: ${e}`,
+      );
+    }
+
+    if (refreshedTab?.type === "reader-unloaded") {
+      try {
+        Zotero_Tabs.close(existingTabID);
+        await this.waitForTabClosed(existingTabID);
+      } catch (e) {
+        Zotero.debug(
+          `Split view: prepareSeparateViewTarget close unloaded tab failed: ${e}`,
+        );
+      }
+      target.tabID = null;
+      await openTarget(refreshedTab.title || existingTitle);
+      return;
+    }
+
+    if (refreshedTab?.type === "reader-loading") {
+      target.tabID = existingTabID;
+      selectTargetIfNeeded();
+      const loadingReader = await this.waitForReaderByTabID(existingTabID);
+      if (!loadingReader) return;
+      await this.applyViewStateToReader(loadingReader, target.viewState);
+      return;
+    }
+
+    target.tabID = null;
+    await openTarget(existingTitle);
   }
 
   /**
@@ -3981,6 +4123,8 @@ export class SplitViewFactory {
       Zotero.debug(`Split view: separateViews save state failed: ${e}`);
     }
 
+    await this.waitForSplitViewToSettle();
+
     const excludedTabIDs = new Set<string>([tabID]);
     const targets: SeparateViewTarget[] = state.isSamePDF
       ? [
@@ -4016,41 +4160,33 @@ export class SplitViewFactory {
           },
         ];
 
+    const primaryTarget =
+      state.isSamePDF
+        ? targets[0]
+        : targets.find((target) => target.side === clickedSide) || targets[0];
+    const secondaryTargets = targets.filter((target) => target !== primaryTarget);
+
+    // While the split tab is still open, replacement tabs must be inserted
+    // after it so they shift into the desired left/right positions once the
+    // split tab is finally closed.
+    const getTargetIndex = (target: SeparateViewTarget) =>
+      state.isSamePDF || target.side === "left" ? tabIndex + 1 : tabIndex + 2;
+
+    if (primaryTarget) {
+      await this.prepareSeparateViewTarget(
+        primaryTarget,
+        getTargetIndex(primaryTarget),
+        true,
+      );
+    }
+
+    for (const target of secondaryTargets) {
+      await this.prepareSeparateViewTarget(target, getTargetIndex(target), false);
+    }
+
     this.cleanupTabResources(tabID);
     Zotero_Tabs.close(tabID);
-
-    for (let i = 0; i < targets.length; i++) {
-      const target = targets[i];
-      const targetIndex = tabIndex + i;
-
-      if (target.tabID) {
-        try {
-          Zotero_Tabs.move(target.tabID, targetIndex);
-        } catch (e) {
-          Zotero.debug(`Split view: separateViews move tab failed: ${e}`);
-        }
-        continue;
-      }
-
-      const reader = await Zotero.Reader.open(target.itemID, undefined, {
-        tabIndex: targetIndex,
-        openInBackground: true,
-        allowDuplicate: true,
-      });
-      target.tabID = reader?.tabID || null;
-    }
-
-    for (const target of targets) {
-      if (!target.tabID) continue;
-      await this.restoreSeparateViewTarget(target.tabID, target.viewState);
-    }
-
-    const finalTarget = state.isSamePDF
-      ? targets[0]
-      : targets.find((target) => target.side === clickedSide) || targets[0];
-    if (finalTarget?.tabID) {
-      Zotero_Tabs.select(finalTarget.tabID);
-    }
+    await this.waitForTabClosed(tabID);
 
     const popup = new ztoolkit.ProgressWindow(addon.data.config.addonName, {
       closeOnClick: true,
@@ -4081,6 +4217,8 @@ export class SplitViewFactory {
     state.isCleaningUp = true;
 
     const win = Zotero.getMainWindow();
+    const Zotero_Tabs = (win as any).Zotero_Tabs;
+    const { tabIndex } = Zotero_Tabs._getTab(tabID);
 
     // 1. Determine which reader to keep
     // If sideToClose is "left", we keep right. If "right", keep left.
@@ -4092,14 +4230,12 @@ export class SplitViewFactory {
     const keepItemID = keepLeft ? state.leftItemID : state.rightItemID;
 
     // 2. Save current view states to disk before closing
+    let leftCurrentState: any = null;
+    let rightCurrentState: any = null;
     try {
       // Get the most current state from browsers
-      const leftCurrentState = this.getCurrentViewStateFromBrowser(
-        state.leftBrowser,
-      );
-      const rightCurrentState = this.getCurrentViewStateFromBrowser(
-        state.rightBrowser,
-      );
+      leftCurrentState = this.getCurrentViewStateFromBrowser(state.leftBrowser);
+      rightCurrentState = this.getCurrentViewStateFromBrowser(state.rightBrowser);
 
       // Save both states
       await Promise.all([
@@ -4116,16 +4252,28 @@ export class SplitViewFactory {
       Zotero.debug("Split view: Error saving states: " + e);
     }
 
+    await this.waitForSplitViewToSettle();
+
     // 3. Clean up split state (but don't close tab yet)
     this.cleanupTabResources(tabID);
 
     // 4. Close current tab and open the kept reader in a new tab
-    // Note: Zotero.Reader.open creates its own tab, so we close ours first
-    const Zotero_Tabs = (win as any).Zotero_Tabs;
-    Zotero_Tabs.close(tabID);
+    // Prepare the kept reader first so closing the split tab doesn't trigger
+    // Zotero to auto-select and load some unrelated unloaded reader tab.
+    const keepTarget: SeparateViewTarget = {
+      itemID: keepItemID,
+      tabID: this.findReusableReaderTabID(keepItemID, new Set([tabID])),
+      viewState: keepLeft
+        ? leftCurrentState || state.leftViewState
+        : rightCurrentState || state.rightViewState,
+      side: keepLeft ? "left" : "right",
+    };
 
-    // 5. Open the kept reader (viewState will auto-restore from .zotero-reader-state)
-    await Zotero.Reader.open(keepItemID, undefined, {});
+    await this.prepareSeparateViewTarget(keepTarget, tabIndex + 1, true);
+
+    // 4. Close current split tab after the kept reader is already ready
+    Zotero_Tabs.close(tabID);
+    await this.waitForTabClosed(tabID);
 
     const popup = new ztoolkit.ProgressWindow(addon.data.config.addonName, {
       closeOnClick: true,
