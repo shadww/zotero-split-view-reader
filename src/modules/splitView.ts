@@ -35,9 +35,10 @@ interface SplitTabState {
   leftParentItemID: number;
   rightParentItemID: number;
   syncEnabled: boolean;
-  primarySide: "left" | "right";
+  primarySide: "left" | "right" | null;
   activeSide: "left" | "right";
   scrollHandler: (() => void) | null;
+  scrollHandlerBrowser: XULBrowserElement | null;
   lastPrimaryScroll: { top: number; left: number } | null;
   syncPaused: boolean;
   sidebarToggleTimers: number[];
@@ -243,14 +244,12 @@ export class SplitViewFactory {
     });
   }
 
-  private static getSetPrimaryMenuLabel(isPrimary: boolean | null): string {
-    return isPrimary === null
-      ? getString("splitview-set-primary")
-      : getString("splitview-set-primary", {
-          args: {
-            state: isPrimary ? "current" : "other",
-          },
-        });
+  private static getSetPrimaryMenuLabel(
+    state: "current" | "other" | "none",
+  ): string {
+    return getString("splitview-set-primary", {
+      args: { state },
+    });
   }
 
   /**
@@ -595,41 +594,22 @@ export class SplitViewFactory {
         };
 
         if (contextMenuSide && tabState) {
-          const primaryLabel = this.getSetPrimaryMenuLabel(
-            tabState.primarySide === contextMenuSide,
-          );
+          const primaryMenuState = !tabState.primarySide
+            ? "none"
+            : tabState.primarySide === contextMenuSide
+              ? "current"
+              : "other";
+          const primaryLabel = this.getSetPrimaryMenuLabel(primaryMenuState);
           iconMap[primaryLabel] =
-            tabState.primarySide === contextMenuSide
+            primaryMenuState === "current"
               ? this.getIconURI("primary_window_24dp.svg")
               : this.getIconURI("standby_24dp.svg");
         } else if (isInSplitView) {
-          iconMap[getString("splitview-set-primary")] =
+          iconMap[this.getSetPrimaryMenuLabel("none")] =
             this.getIconURI("standby_24dp.svg");
         }
 
         const menuItems: any[] = [];
-
-        // First item: "Split-View Reader" toggle or Close
-        menuItems.push({
-          label: menuLabel,
-          onCommand: () => {
-            // Re-check state at command time to avoid stale references
-            const currentTabState = this.stateMap.get(readerTabID);
-            const currentlyInSplitView =
-              !!currentTabState && !currentTabState.isCleaningUp;
-
-            if (currentlyInSplitView) {
-              const clickedSide =
-                this.getReaderSide(readerTabID, reader as any) ||
-                currentTabState?.activeSide ||
-                "right";
-              // Pass the side to close (the one we clicked on)
-              this.revertToSingleReader(readerTabID, clickedSide);
-            } else {
-              this.handleSplitView(reader);
-            }
-          },
-        });
 
         // If we have an active split view, add additional options
         if (isInSplitView && tabState) {
@@ -638,6 +618,15 @@ export class SplitViewFactory {
             if (!s || s.isCleaningUp) return null;
             return this.getReaderSide(readerTabID, reader as any) || s.activeSide;
           };
+
+          menuItems.push({
+            label: getString("splitview-swap-pdf"),
+            onCommand: async () => {
+              await this.swapPDFs(readerTabID);
+            },
+          });
+          iconMap[getString("splitview-swap-pdf")] =
+            this.getIconURI("swap_horiz_24dp.svg");
 
           menuItems.push({
             label: getString("splitview-separate-views"),
@@ -651,19 +640,86 @@ export class SplitViewFactory {
           iconMap[getString("splitview-separate-views")] =
             this.getIconURI("separate_24dp.svg");
 
+          menuItems.push({
+            label: menuLabel,
+            onCommand: () => {
+              // Re-check state at command time to avoid stale references
+              const currentTabState = this.stateMap.get(readerTabID);
+              const currentlyInSplitView =
+                !!currentTabState && !currentTabState.isCleaningUp;
+
+              if (currentlyInSplitView) {
+                const clickedSide =
+                  this.getReaderSide(readerTabID, reader as any) ||
+                  currentTabState?.activeSide ||
+                  "right";
+                // Pass the side to close (the one we clicked on)
+                this.revertToSingleReader(readerTabID, clickedSide);
+              } else {
+                this.handleSplitView(reader);
+              }
+            },
+          });
+
           const isCurrentPrimary = contextMenuSide
             ? tabState.primarySide === contextMenuSide
-            : null;
+            : false;
+          const hasPrimary = !!tabState.primarySide;
+          const canUnsetPrimary =
+            isCurrentPrimary && getPref("followFocusPrimary") === false;
+          const primaryMenuState = !hasPrimary
+            ? "none"
+            : isCurrentPrimary
+              ? "current"
+              : "other";
           menuItems.push({
-            label: this.getSetPrimaryMenuLabel(isCurrentPrimary),
-            disabled: isCurrentPrimary === true,
+            label: this.getSetPrimaryMenuLabel(primaryMenuState),
+            disabled: isCurrentPrimary && !canUnsetPrimary,
             onCommand: () => {
               // Re-check state at command time
               const s = this.stateMap.get(readerTabID);
               const clickedSide = getClickedSide();
               if (s && !s.isCleaningUp && clickedSide) {
-                this.setPrimarySide(readerTabID, clickedSide);
+                const shouldUnset =
+                  s.primarySide === clickedSide &&
+                  getPref("followFocusPrimary") === false;
+                this.setPrimarySide(
+                  readerTabID,
+                  shouldUnset ? null : clickedSide,
+                );
               }
+            },
+          });
+
+          menuItems.push({
+            label: getString("splitview-open-another"),
+            onCommand: async () => {
+              const clickedSide = getClickedSide();
+              if (clickedSide) {
+                await this.selectAndLoadPDF(readerTabID, clickedSide);
+              }
+            },
+          });
+          iconMap[getString("splitview-open-another")] =
+            this.getIconURI("file_open_24dp.svg");
+
+          menuItems.push({
+            label: getString("splitview-sync-position"),
+            onCommand: () => {
+              const clickedSide = getClickedSide();
+              if (clickedSide) {
+                this.syncPositionAndScale(readerTabID, clickedSide);
+              }
+            },
+          });
+          iconMap[getString("splitview-sync-position")] =
+            this.getIconURI("sync_24dp.svg");
+        } else {
+          // First item outside split view: "Split-View Reader" open action
+          menuItems.push({
+            label: menuLabel,
+            onCommand: () => {
+              this.handleSplitView(reader);
             },
           });
         }
@@ -1200,14 +1256,24 @@ export class SplitViewFactory {
       // notification popup that setPrimarySide shows)
       if (primarySide === "left" || primarySide === "right") {
         state.primarySide = primarySide;
-        this.updateScrollbarColors(tabID);
-        // Sync polling will be started by convertToSplitView's delay timer
+      } else if (
+        Object.prototype.hasOwnProperty.call(savedData, "primarySide") &&
+        primarySide === null
+      ) {
+        state.primarySide = null;
       }
+      this.updateScrollbarColors(tabID);
+      // Sync polling will be started by convertToSplitView's delay timer if a
+      // primary side is available.
 
       // Restore active side
       if (activeSide === "left" || activeSide === "right") {
         state.activeSide = activeSide;
       }
+
+      // Persist the restored state back into the tab session data so an
+      // explicit `primarySide: null` survives the next Zotero restart.
+      this.updateTabDataForSession(tabID);
     }
 
     Zotero.debug(
@@ -1276,7 +1342,10 @@ export class SplitViewFactory {
   /**
    * Set which side is the primary (controller)
    */
-  private static setPrimarySide(tabID: string, side: "left" | "right") {
+  private static setPrimarySide(
+    tabID: string,
+    side: "left" | "right" | null,
+  ) {
     const state = this.stateMap.get(tabID);
     if (!state || state.isCleaningUp) return;
 
@@ -1284,15 +1353,18 @@ export class SplitViewFactory {
     this.stopSyncPolling(tabID);
 
     state.primarySide = side;
+    state.lastPrimaryScroll = null;
 
     // Update scrollbar colors to reflect new primary side
     this.updateScrollbarColors(tabID);
 
     // Restart sync with new primary
-    if (state.syncEnabled) {
+    if (state.syncEnabled && side) {
       this.initSyncState(tabID);
       this.startSyncPolling(tabID);
     }
+
+    this.updateTabDataForSession(tabID);
   }
 
   /**
@@ -1910,6 +1982,7 @@ export class SplitViewFactory {
       primarySide: "left",
       activeSide: "left",
       scrollHandler: null,
+      scrollHandlerBrowser: null,
       lastPrimaryScroll: null,
       syncPaused: false,
       sidebarToggleTimers: [],
@@ -2240,6 +2313,7 @@ export class SplitViewFactory {
       primarySide: "left",
       activeSide: "left",
       scrollHandler: null,
+      scrollHandlerBrowser: null,
       lastPrimaryScroll: null,
       syncPaused: false,
       sidebarToggleTimers: [],
@@ -2542,6 +2616,10 @@ export class SplitViewFactory {
   private static initSyncState(tabID: string) {
     const state = this.stateMap.get(tabID);
     if (!state || state.isCleaningUp) return;
+    if (!state.primarySide) {
+      state.lastPrimaryScroll = null;
+      return;
+    }
 
     try {
       // Refresh cached viewer containers to ensure syncViews uses up-to-date refs
@@ -3913,6 +3991,23 @@ export class SplitViewFactory {
         this.activateSide(capturedTabID, currentSide, mainWindow);
       }, 0);
 
+      // Swap PDFs (exchange left and right PDFs)
+      const swapItem = mainWindow.document.createXULElement("menuitem");
+      swapItem.setAttribute("label", getString("splitview-swap-pdf"));
+      this.setMenuItemIcon(swapItem, this.getIconURI("swap_horiz_24dp.svg"));
+      swapItem.addEventListener("command", async () => {
+        await this.swapPDFs(capturedTabID);
+      });
+      popup.appendChild(swapItem);
+
+      const separateItem = mainWindow.document.createXULElement("menuitem");
+      separateItem.setAttribute("label", getString("splitview-separate-views"));
+      this.setMenuItemIcon(separateItem, this.getIconURI("separate_24dp.svg"));
+      separateItem.addEventListener("command", () => {
+        this.separateViews(capturedTabID, currentSide);
+      });
+      popup.appendChild(separateItem);
+
       // Close Split View (revert to single reader)
       const closeItem = mainWindow.document.createXULElement("menuitem");
       closeItem.setAttribute(
@@ -3928,21 +4023,21 @@ export class SplitViewFactory {
       });
       popup.appendChild(closeItem);
 
-      const separateItem = mainWindow.document.createXULElement("menuitem");
-      separateItem.setAttribute("label", getString("splitview-separate-views"));
-      this.setMenuItemIcon(separateItem, this.getIconURI("separate_24dp.svg"));
-      separateItem.addEventListener("command", () => {
-        this.separateViews(capturedTabID, currentSide);
-      });
-      popup.appendChild(separateItem);
-
       // Set Primary (right below Split-View Reader)
       const primaryItem = mainWindow.document.createXULElement("menuitem");
+      const hasPrimary = !!ownerState.primarySide;
+      const canUnsetPrimary =
+        isPrimary && getPref("followFocusPrimary") === false;
+      const primaryMenuState = !hasPrimary
+        ? "none"
+        : isPrimary
+          ? "current"
+          : "other";
       primaryItem.setAttribute(
         "label",
-        this.getSetPrimaryMenuLabel(isPrimary),
+        this.getSetPrimaryMenuLabel(primaryMenuState),
       );
-      if (isPrimary) {
+      if (isPrimary && !canUnsetPrimary) {
         primaryItem.setAttribute("disabled", "true");
       }
       this.setMenuItemIcon(
@@ -3951,11 +4046,12 @@ export class SplitViewFactory {
           isPrimary ? "primary_window_24dp.svg" : "standby_24dp.svg",
         ),
       );
-      if (!isPrimary) {
-        primaryItem.addEventListener("command", () => {
-          this.setPrimarySide(capturedTabID, currentSide);
-        });
-      }
+      primaryItem.addEventListener("command", () => {
+        const shouldUnset =
+          ownerState.primarySide === currentSide &&
+          getPref("followFocusPrimary") === false;
+        this.setPrimarySide(capturedTabID, shouldUnset ? null : currentSide);
+      });
       popup.appendChild(primaryItem);
 
       // Replace the PDF on the side where the user right-clicked
@@ -3972,15 +4068,6 @@ export class SplitViewFactory {
         await this.selectAndLoadPDF(capturedTabID, currentSide);
       });
       popup.appendChild(openAnotherItem);
-
-      // Swap PDFs (exchange left and right PDFs)
-      const swapItem = mainWindow.document.createXULElement("menuitem");
-      swapItem.setAttribute("label", getString("splitview-swap-pdf"));
-      this.setMenuItemIcon(swapItem, this.getIconURI("swap_horiz_24dp.svg"));
-      swapItem.addEventListener("command", async () => {
-        await this.swapPDFs(capturedTabID);
-      });
-      popup.appendChild(swapItem);
 
       // Sync Position and Scale
       const syncPositionItem = mainWindow.document.createXULElement("menuitem");
@@ -4715,6 +4802,7 @@ export class SplitViewFactory {
   private static startSyncPolling(tabID: string) {
     const state = this.stateMap.get(tabID);
     if (!state || state.isCleaningUp) return;
+    if (!state.primarySide) return;
 
     try {
       const primaryBrowser =
@@ -4750,6 +4838,7 @@ export class SplitViewFactory {
       primaryContainer.addEventListener("scroll", state.scrollHandler, {
         passive: true,
       });
+      state.scrollHandlerBrowser = primaryBrowser;
     } catch (e) {
       Zotero.debug(
         `Split view: startSyncPolling error (browser may be dead): ${e}`,
@@ -4767,10 +4856,9 @@ export class SplitViewFactory {
     // Remove scroll listener
     if (state.scrollHandler) {
       try {
-        const primaryBrowser =
-          state.primarySide === "left" ? state.leftBrowser : state.rightBrowser;
-        const primaryContainer =
-          this.getViewerContainerFromBrowser(primaryBrowser);
+        const primaryContainer = state.scrollHandlerBrowser
+          ? this.getViewerContainerFromBrowser(state.scrollHandlerBrowser)
+          : null;
         if (primaryContainer) {
           primaryContainer.removeEventListener("scroll", state.scrollHandler);
         }
@@ -4778,6 +4866,7 @@ export class SplitViewFactory {
         // Browser may be dead
       }
       state.scrollHandler = null;
+      state.scrollHandlerBrowser = null;
     }
     // Cancel any pending rAF
     state.scrollSyncRAFPending = false;
@@ -4793,6 +4882,7 @@ export class SplitViewFactory {
   private static syncViews(tabID: string) {
     const state = this.stateMap.get(tabID);
     if (!state || state.isCleaningUp) return;
+    if (!state.primarySide) return;
     if (!state.lastPrimaryScroll) return;
     if (state.syncPaused) return;
     if (state.ctrlPressed) return;
@@ -5217,6 +5307,7 @@ export class SplitViewFactory {
     const state = this.stateMap.get(tabID);
     if (!state || state.isCleaningUp) return;
     if (!state.syncEnabled) return;
+    if (!state.primarySide) return;
 
     const secondaryBrowser =
       state.primarySide === "left" ? state.rightBrowser : state.leftBrowser;
@@ -5417,13 +5508,15 @@ export class SplitViewFactory {
   ) {
     const state = this.stateMap.get(tabID);
     if (!state || state.isCleaningUp) return;
-    if (state.activeSide === side) return;
+    const shouldPromotePrimary =
+      getPref("followFocusPrimary") && state.primarySide !== side;
+    if (state.activeSide === side && !shouldPromotePrimary) return;
 
     state.activeSide = side;
 
     // Auto-switch primary when followFocusPrimary preference is enabled.
     // Directly set state to avoid notification popup from setPrimarySide().
-    if (getPref("followFocusPrimary") && state.primarySide !== side) {
+    if (shouldPromotePrimary) {
       state.primarySide = side;
       if (state.syncEnabled) {
         this.stopSyncPolling(tabID);

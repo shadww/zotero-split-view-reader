@@ -23,8 +23,9 @@ splitview-sync-enabled = Actions sync enabled
 splitview-sync-disabled = Actions sync disabled
 splitview-set-primary =
     { $state ->
-        [current] Primary View
-       *[other] Primary View
+        [current] Unset Primary View
+        [none] Set as Primary View
+       *[other] Set as Primary View
     }
 splitview-primary-set = Set as primary view
 splitview-closed = Split view closed

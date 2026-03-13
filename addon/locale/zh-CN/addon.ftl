@@ -23,8 +23,9 @@ splitview-sync-enabled = 操作同步已启用
 splitview-sync-disabled = 操作同步已禁用
 splitview-set-primary =
     { $state ->
-        [current] 主视图
-       *[other] 主视图
+        [current] 取消主视图
+        [none] 设为主视图
+       *[other] 设为主视图
     }
 splitview-primary-set = 已设为主视图
 splitview-closed = 分屏视图已关闭
