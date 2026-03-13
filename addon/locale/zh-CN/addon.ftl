@@ -15,20 +15,35 @@ splitview-btn-open = 打开
 splitview-btn-cancel = 取消
 splitview-loaded = 已加载
 splitview-no-open-pdf = 未找到已打开的 PDF
-splitview-close-menu-label = 关闭分屏阅读器
+splitview-close-menu-label = 关闭此视图
 splitview-searching = 搜索 PDF 中...
 splitview-not-found = 未找到 PDF
 splitview-sync-actions = 操作同步
 splitview-sync-enabled = 操作同步已启用
 splitview-sync-disabled = 操作同步已禁用
-splitview-set-primary = 主窗口
-splitview-primary-set = 已设为主窗口
+splitview-set-primary =
+    { $state ->
+        [current] 主视图
+       *[other] 主视图
+    }
+splitview-primary-set = 已设为主视图
 splitview-closed = 分屏视图已关闭
 splitview-same-pdf-loaded = 同文件分屏已加载
-splitview-sync-position = 同步位置和缩放
+splitview-sync-position =
+    { $side ->
+        [left] 使此视图与左侧视图一致
+        [right] 使此视图与右侧视图一致
+       *[other] 使视图位置和缩放一致
+    }
 splitview-position-synced = 位置和缩放已同步
+splitview-last-page-reached =
+    { $side ->
+        [left] 左侧视图已到达最后一页
+        [right] 右侧视图已到达最后一页
+       *[other] 该视图已到达最后一页
+    }
 splitview-separate-views = 分离视图
-splitview-open-another = 另一个 PDF
+splitview-open-another = 更换此视图中的 PDF
 splitview-swap-pdf = 交换 PDF
 splitview-command-label = 分屏阅读器
 splitview-select-first-pdf = 选择已打开的 PDF 或输入文字搜索

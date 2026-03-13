@@ -15,20 +15,35 @@ splitview-btn-open = Open
 splitview-btn-cancel = Cancel
 splitview-loaded = Loaded
 splitview-no-open-pdf = No open PDF found
-splitview-close-menu-label = Close Split-View Reader
+splitview-close-menu-label = Close This View
 splitview-searching = Searching PDFs...
 splitview-not-found = No PDF found
 splitview-sync-actions = Actions Sync
 splitview-sync-enabled = Actions sync enabled
 splitview-sync-disabled = Actions sync disabled
-splitview-set-primary = Primary Window
-splitview-primary-set = Set as primary window
+splitview-set-primary =
+    { $state ->
+        [current] Primary View
+       *[other] Primary View
+    }
+splitview-primary-set = Set as primary view
 splitview-closed = Split view closed
 splitview-same-pdf-loaded = Same PDF split view loaded
-splitview-sync-position = Sync Position & Zoom
+splitview-sync-position =
+    { $side ->
+        [left] Match This View to Left View
+        [right] Match This View to Right View
+       *[other] Match View Position & Zoom
+    }
 splitview-position-synced = Position and zoom synced
+splitview-last-page-reached =
+    { $side ->
+        [left] Left view has reached the last page
+        [right] Right view has reached the last page
+       *[other] The view has reached the last page
+    }
 splitview-separate-views = Separate Views
-splitview-open-another = Open Another PDF
+splitview-open-another = Change PDF in This View
 splitview-swap-pdf = Swap PDFs
 splitview-command-label = Split View Reader
 splitview-select-first-pdf = Select open PDF or type to search

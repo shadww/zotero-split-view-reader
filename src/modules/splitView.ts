@@ -222,6 +222,37 @@ export class SplitViewFactory {
     );
   }
 
+  private static getCloseViewMenuLabel(): string {
+    return getString("splitview-close-menu-label");
+  }
+
+  private static getOpenAnotherPDFMenuLabel(): string {
+    return getString("splitview-open-another");
+  }
+
+  private static getSyncPositionMenuLabel(
+    currentSide: "left" | "right" | null,
+  ): string {
+    if (!currentSide) {
+      return getString("splitview-sync-position");
+    }
+    return getString("splitview-sync-position", {
+      args: {
+        side: currentSide === "left" ? "right" : "left",
+      },
+    });
+  }
+
+  private static getSetPrimaryMenuLabel(isPrimary: boolean | null): string {
+    return isPrimary === null
+      ? getString("splitview-set-primary")
+      : getString("splitview-set-primary", {
+          args: {
+            state: isPrimary ? "current" : "other",
+          },
+        });
+  }
+
   /**
    * Register an event listener and track it for cleanup
    */
@@ -541,6 +572,13 @@ export class SplitViewFactory {
         // Check if THIS tab has an active split view (not cleaning up)
         const tabState = this.stateMap.get(readerTabID);
         const isInSplitView = !!tabState && !tabState.isCleaningUp;
+        const getContextMenuSide = () => {
+          const s = this.stateMap.get(readerTabID);
+          if (!s || s.isCleaningUp) return null;
+          const readerSide = this.getReaderSide(readerTabID, reader as any);
+          return readerSide || s.activeSide || null;
+        };
+        const contextMenuSide = isInSplitView ? getContextMenuSide() : null;
 
         // Determine icon for the Split-View Reader toggle
         const splitViewIcon = isInSplitView
@@ -550,11 +588,24 @@ export class SplitViewFactory {
         // Build a label-to-icon map for post-processing
         // Use the actual label that will be shown (close or open)
         const menuLabel = isInSplitView
-          ? getString("splitview-close-menu-label")
+          ? this.getCloseViewMenuLabel()
           : getString("splitview-menu-label");
         const iconMap: Record<string, string> = {
           [menuLabel]: splitViewIcon,
         };
+
+        if (contextMenuSide && tabState) {
+          const primaryLabel = this.getSetPrimaryMenuLabel(
+            tabState.primarySide === contextMenuSide,
+          );
+          iconMap[primaryLabel] =
+            tabState.primarySide === contextMenuSide
+              ? this.getIconURI("primary_window_24dp.svg")
+              : this.getIconURI("standby_24dp.svg");
+        } else if (isInSplitView) {
+          iconMap[getString("splitview-set-primary")] =
+            this.getIconURI("standby_24dp.svg");
+        }
 
         const menuItems: any[] = [];
 
@@ -568,9 +619,10 @@ export class SplitViewFactory {
               !!currentTabState && !currentTabState.isCleaningUp;
 
             if (currentlyInSplitView) {
-              // Use activeSide to determine which side was clicked
-              // activeSide is updated whenever user clicks/focuses on a side
-              const clickedSide = currentTabState?.activeSide || "right";
+              const clickedSide =
+                this.getReaderSide(readerTabID, reader as any) ||
+                currentTabState?.activeSide ||
+                "right";
               // Pass the side to close (the one we clicked on)
               this.revertToSingleReader(readerTabID, clickedSide);
             } else {
@@ -581,12 +633,10 @@ export class SplitViewFactory {
 
         // If we have an active split view, add additional options
         if (isInSplitView && tabState) {
-          // Determine which side this reader is on
-          const currentSide = this.getReaderSide(readerTabID, reader as any);
           const getClickedSide = () => {
             const s = this.stateMap.get(readerTabID);
             if (!s || s.isCleaningUp) return null;
-            return currentSide || s.activeSide || null;
+            return this.getReaderSide(readerTabID, reader as any) || s.activeSide;
           };
 
           menuItems.push({
@@ -601,20 +651,21 @@ export class SplitViewFactory {
           iconMap[getString("splitview-separate-views")] =
             this.getIconURI("separate_24dp.svg");
 
-          // Second item: "Primary Window" (icon replaces checkmark)
+          const isCurrentPrimary = contextMenuSide
+            ? tabState.primarySide === contextMenuSide
+            : null;
           menuItems.push({
-            label: getString("splitview-set-primary"),
+            label: this.getSetPrimaryMenuLabel(isCurrentPrimary),
+            disabled: isCurrentPrimary === true,
             onCommand: () => {
               // Re-check state at command time
               const s = this.stateMap.get(readerTabID);
-              if (s && !s.isCleaningUp && currentSide) {
-                this.setPrimarySide(readerTabID, currentSide);
+              const clickedSide = getClickedSide();
+              if (s && !s.isCleaningUp && clickedSide) {
+                this.setPrimarySide(readerTabID, clickedSide);
               }
             },
           });
-          iconMap[getString("splitview-set-primary")] = this.getIconURI(
-            "primary_window_24dp.svg",
-          );
         }
 
         (append as any)(...menuItems);
@@ -1203,6 +1254,11 @@ export class SplitViewFactory {
     if (!state) return null;
 
     try {
+      // Same-PDF split views expose the same itemID on both embedded readers,
+      // so itemID-based side detection is ambiguous there.
+      if (state.leftItemID === state.rightItemID) {
+        return null;
+      }
       if (reader.itemID === state.leftItemID) {
         return "left";
       }
@@ -1427,8 +1483,8 @@ export class SplitViewFactory {
         this.setupAnnotationManagerSync(tabID);
       }
 
-      // Make the side where we opened the PDF the primary and apply scrollbar color
-      state.primarySide = targetSide;
+      // Preserve the existing primary side when replacing a PDF in one view.
+      // "Change PDF in This View" should not implicitly transfer primary control.
       this.updateScrollbarColors(tabID);
 
       // Update tab data
@@ -2533,17 +2589,15 @@ export class SplitViewFactory {
   }
 
   /**
-   * Sync position and scale from source browser to target browser.
+   * Sync the current side to the target side's position and scale state.
    *
-   * Uses Zotero's _primaryView._setState() which atomically applies
-   * pageIndex, top, left, and scale via scrollPageIntoView with destArray,
-   * instead of the previous approach of navigate({ pageIndex }) which only
-   * scrolled to the top of the page without applying position offsets or scale.
+   * The current side is the view where the context menu was triggered.
+   * The target side is always the opposite view whose state is copied onto the
+   * current side.
    */
   private static async syncPositionAndScale(
     tabID: string,
-    sourceBrowser: XULBrowserElement,
-    targetBrowser: XULBrowserElement,
+    currentSide: "left" | "right",
   ) {
     const state = this.stateMap.get(tabID);
     if (!state || state.isCleaningUp) return;
@@ -2552,73 +2606,37 @@ export class SplitViewFactory {
     state.syncPaused = true;
 
     try {
-      const sourceReader = this.getInternalReaderFromBrowser(sourceBrowser);
-      const targetReader = this.getInternalReaderFromBrowser(targetBrowser);
-      if (!sourceReader || !targetReader) {
-        Zotero.debug("Split view: syncPositionAndScale - readers not found");
+      const targetSide = currentSide === "left" ? "right" : "left";
+      const sourceBrowser =
+        targetSide === "left" ? state.leftBrowser : state.rightBrowser;
+      const currentBrowser =
+        currentSide === "left" ? state.leftBrowser : state.rightBrowser;
+      const currentReader = this.getInternalReaderFromBrowser(currentBrowser);
+      if (!currentReader) {
+        Zotero.debug("Split view: syncPositionAndScale - current reader not found");
         return;
       }
 
-      // Get source viewState (contains pageIndex, top, left, scale, scrollMode, spreadMode)
-      const viewState = sourceReader._state?.primaryViewState;
+      const fallbackViewState =
+        targetSide === "left" ? state.leftViewState : state.rightViewState;
+      const viewState =
+        this.getImmediateViewStateFromBrowser(sourceBrowser) ||
+        this.getCurrentViewStateFromBrowser(sourceBrowser) ||
+        (fallbackViewState
+          ? JSON.parse(JSON.stringify(fallbackViewState))
+          : null);
       if (!viewState) {
         Zotero.debug("Split view: syncPositionAndScale - viewState not found");
         return;
       }
 
-      // Get target primary view for _setState
-      const targetPrimaryView = targetReader._primaryView;
-      if (!targetPrimaryView) {
-        Zotero.debug(
-          "Split view: syncPositionAndScale - target _primaryView not found",
-        );
-        return;
-      }
-
-      // Build a plain state object with only the fields _setState expects.
-      // _setState handles scale + position atomically via scrollPageIntoView
-      // with a destArray: [null, {name:'XYZ'}, left, top, scale].
-      const stateToApply: Record<string, any> = {
-        pageIndex: viewState.pageIndex ?? 0,
-        scale: viewState.scale,
-      };
-      // top/left: only include if defined (null values are ignored by _setState)
-      if (viewState.top !== undefined) {
-        stateToApply.top = viewState.top;
-      }
-      if (viewState.left !== undefined) {
-        stateToApply.left = viewState.left;
-      }
-      if (Number.isInteger(viewState.scrollMode)) {
-        stateToApply.scrollMode = viewState.scrollMode;
-      }
-      if (Number.isInteger(viewState.spreadMode)) {
-        stateToApply.spreadMode = viewState.spreadMode;
-      }
-
-      // Clone state into the target browser's compartment to avoid
-      // cross-compartment Xray wrapper issues with property access
-      let clonedState = stateToApply;
-      try {
-        const targetWin = targetBrowser.contentWindow;
-        if (targetWin) {
-          clonedState = Components.utils.cloneInto(stateToApply, targetWin, {
-            wrapReflectors: true,
-          });
-        }
-      } catch (e) {
-        Zotero.debug(
-          `Split view: syncPositionAndScale - cloneInto failed, using plain object: ${e}`,
-        );
-      }
-
-      // Apply the full view state atomically
-      await targetPrimaryView._setState(clonedState);
+      const applyResult = await this.applyViewStateToReader(currentReader, viewState);
 
       Zotero.debug(
-        `Split view: synced position (page ${stateToApply.pageIndex}, ` +
-          `top=${stateToApply.top}, left=${stateToApply.left}, ` +
-          `scale=${stateToApply.scale})`,
+        `Split view: synced ` +
+          `${currentSide} view to ${targetSide} view state ` +
+          `(page ${viewState.pageIndex}, top=${viewState.top}, ` +
+          `left=${viewState.left}, scale=${viewState.scale})`,
       );
 
       // Show notification
@@ -2626,7 +2644,11 @@ export class SplitViewFactory {
         closeOnClick: true,
       })
         .createLine({
-          text: getString("splitview-position-synced"),
+          text: applyResult?.pageIndexClamped
+            ? getString("splitview-last-page-reached", {
+                args: { side: currentSide },
+              })
+            : getString("splitview-position-synced"),
           type: "default",
           icon: `chrome://${config.addonRef}/content/icons/svreader.svg`,
         })
@@ -3424,6 +3446,57 @@ export class SplitViewFactory {
   }
 
   /**
+   * Get the immediate visible view state from a browser.
+   *
+   * Unlike the debounced reader state, this reads directly from PDF.js so a
+   * context-menu sync uses the state the user is currently looking at.
+   */
+  private static getImmediateViewStateFromBrowser(
+    browser: XULBrowserElement,
+  ): any {
+    try {
+      const internalReader = this.getInternalReaderFromBrowser(browser);
+      return this.getImmediateViewStateFromReader(internalReader);
+    } catch {
+      // Ignore errors and let callers fall back to cached state
+    }
+    return null;
+  }
+
+  private static getImmediateViewStateFromReader(reader: any): any {
+    try {
+      const internalReader = reader?._internalReader || reader;
+      const primaryView = internalReader?._primaryView;
+      const iframeWindow = primaryView?._iframeWindow;
+      const pdfViewer = iframeWindow?.PDFViewerApplication?.pdfViewer;
+      if (!pdfViewer) return null;
+
+      const location = pdfViewer._location;
+      if (!location) return null;
+
+      const viewState: Record<string, any> = {
+        pageIndex: Math.max(0, (location.pageNumber || 1) - 1),
+        scale:
+          location.scale !== undefined
+            ? location.scale
+            : pdfViewer.currentScaleValue,
+        scrollMode: pdfViewer.scrollMode,
+        spreadMode: pdfViewer.spreadMode,
+      };
+      if (location.top !== undefined) {
+        viewState.top = location.top;
+      }
+      if (location.left !== undefined) {
+        viewState.left = location.left;
+      }
+      return viewState;
+    } catch {
+      // Ignore errors and let callers fall back to cached state
+    }
+    return null;
+  }
+
+  /**
    * Get current view state from internal reader in browser
    */
   private static getCurrentViewStateFromBrowser(
@@ -3536,21 +3609,44 @@ export class SplitViewFactory {
   private static async applyViewStateToReader(
     reader: any,
     viewState: any,
-  ): Promise<void> {
-    if (!reader || !viewState) return;
+  ): Promise<
+    | {
+        pageIndexClamped: boolean;
+        requestedPageIndex: number;
+        appliedPageIndex: number;
+      }
+    | null
+  > {
+    if (!reader || !viewState) return null;
 
     try {
-      const targetPrimaryView = reader._internalReader?._primaryView;
-      if (!targetPrimaryView?._setState) return;
+      const internalReader = reader._internalReader || reader;
+      const targetPrimaryView = internalReader?._primaryView;
+      if (!targetPrimaryView?._setState) return null;
+
+      const pdfViewer = this.getPdfViewerFromReader(internalReader);
+      const statsPagesCount = internalReader?._state?.primaryViewStats?.pagesCount;
+      const requestedPageIndex = Math.max(0, viewState.pageIndex ?? 0);
+      let pageIndex = requestedPageIndex;
+      let pageIndexClamped = false;
+
+      const pagesCount = pdfViewer?.pagesCount ?? statsPagesCount;
+      if (Number.isInteger(pagesCount) && pagesCount > 0) {
+        const maxPageIndex = pagesCount - 1;
+        if (pageIndex > maxPageIndex) {
+          pageIndex = maxPageIndex;
+          pageIndexClamped = true;
+        }
+      }
 
       const stateToApply: Record<string, any> = {
-        pageIndex: viewState.pageIndex ?? 0,
+        pageIndex,
         scale: viewState.scale,
       };
-      if (viewState.top !== undefined) {
+      if (!pageIndexClamped && viewState.top !== undefined) {
         stateToApply.top = viewState.top;
       }
-      if (viewState.left !== undefined) {
+      if (!pageIndexClamped && viewState.left !== undefined) {
         stateToApply.left = viewState.left;
       }
       if (Number.isInteger(viewState.scrollMode)) {
@@ -3563,7 +3659,10 @@ export class SplitViewFactory {
       let clonedState = stateToApply;
       try {
         const targetWin =
-          targetPrimaryView._iframeWindow || reader._iframeWindow || null;
+          targetPrimaryView._iframeWindow ||
+          internalReader?._iframeWindow ||
+          reader._iframeWindow ||
+          null;
         if (targetWin) {
           clonedState = Components.utils.cloneInto(stateToApply, targetWin, {
             wrapReflectors: true,
@@ -3575,10 +3674,27 @@ export class SplitViewFactory {
         );
       }
 
+      if (pageIndexClamped) {
+        Zotero.debug(
+          `Split view: clamped pageIndex ${requestedPageIndex} to ${pageIndex}`,
+        );
+      }
+
       await targetPrimaryView._setState(clonedState);
+      const appliedViewState = this.getImmediateViewStateFromReader(internalReader);
+      const appliedPageIndex = Math.max(
+        0,
+        appliedViewState?.pageIndex ?? pageIndex,
+      );
+      return {
+        pageIndexClamped: pageIndexClamped || appliedPageIndex !== requestedPageIndex,
+        requestedPageIndex,
+        appliedPageIndex,
+      };
     } catch (e) {
       Zotero.debug(`Split view: applyViewStateToReader failed: ${e}`);
     }
+    return null;
   }
 
   /**
@@ -3790,10 +3906,19 @@ export class SplitViewFactory {
       const currentSide = isLeft ? "left" : "right";
       const isPrimary = ownerState.primarySide === currentSide;
       const capturedTabID = ownerTabID;
+      // By design, opening a context menu counts as interacting with this side.
+      // That means the side becomes active, and with followFocusPrimary enabled
+      // it may also become the primary side before a menu command is chosen.
+      mainWindow.setTimeout(() => {
+        this.activateSide(capturedTabID, currentSide, mainWindow);
+      }, 0);
 
       // Close Split View (revert to single reader)
       const closeItem = mainWindow.document.createXULElement("menuitem");
-      closeItem.setAttribute("label", getString("splitview-close-menu-label"));
+      closeItem.setAttribute(
+        "label",
+        this.getCloseViewMenuLabel(),
+      );
       this.setMenuItemIcon(
         closeItem,
         this.getIconURI("do_not_splitscreen_vertical_24dp.svg"),
@@ -3813,21 +3938,31 @@ export class SplitViewFactory {
 
       // Set Primary (right below Split-View Reader)
       const primaryItem = mainWindow.document.createXULElement("menuitem");
-      primaryItem.setAttribute("label", getString("splitview-set-primary"));
+      primaryItem.setAttribute(
+        "label",
+        this.getSetPrimaryMenuLabel(isPrimary),
+      );
+      if (isPrimary) {
+        primaryItem.setAttribute("disabled", "true");
+      }
       this.setMenuItemIcon(
         primaryItem,
-        this.getIconURI("primary_window_24dp.svg"),
+        this.getIconURI(
+          isPrimary ? "primary_window_24dp.svg" : "standby_24dp.svg",
+        ),
       );
-      primaryItem.addEventListener("command", () => {
-        this.setPrimarySide(capturedTabID, currentSide);
-      });
+      if (!isPrimary) {
+        primaryItem.addEventListener("command", () => {
+          this.setPrimarySide(capturedTabID, currentSide);
+        });
+      }
       popup.appendChild(primaryItem);
 
-      // Open Another PDF (replace PDF on the side where the user right-clicked)
+      // Replace the PDF on the side where the user right-clicked
       const openAnotherItem = mainWindow.document.createXULElement("menuitem");
       openAnotherItem.setAttribute(
         "label",
-        getString("splitview-open-another"),
+        this.getOpenAnotherPDFMenuLabel(),
       );
       this.setMenuItemIcon(
         openAnotherItem,
@@ -3851,14 +3986,11 @@ export class SplitViewFactory {
       const syncPositionItem = mainWindow.document.createXULElement("menuitem");
       syncPositionItem.setAttribute(
         "label",
-        getString("splitview-sync-position"),
+        this.getSyncPositionMenuLabel(currentSide),
       );
       this.setMenuItemIcon(syncPositionItem, this.getIconURI("sync_24dp.svg"));
       syncPositionItem.addEventListener("command", () => {
-        const s = this.stateMap.get(capturedTabID);
-        if (!s) return;
-        const targetBrowser = isLeft ? s.rightBrowser : s.leftBrowser;
-        this.syncPositionAndScale(capturedTabID, browser, targetBrowser);
+        this.syncPositionAndScale(capturedTabID, currentSide);
       });
       popup.appendChild(syncPositionItem);
     }
@@ -5271,6 +5403,47 @@ export class SplitViewFactory {
   }
 
   /**
+   * Activate one side of the split view and run all related side effects.
+   *
+   * "Activation" is intentionally shared by click, focus, and context-menu
+   * interactions. In other words, right-clicking a side is treated the same as
+   * focusing that side for purposes such as activeSide, followFocusPrimary,
+   * scrollbar highlighting, and context-pane switching.
+   */
+  private static activateSide(
+    tabID: string,
+    side: "left" | "right",
+    win: Window,
+  ) {
+    const state = this.stateMap.get(tabID);
+    if (!state || state.isCleaningUp) return;
+    if (state.activeSide === side) return;
+
+    state.activeSide = side;
+
+    // Auto-switch primary when followFocusPrimary preference is enabled.
+    // Directly set state to avoid notification popup from setPrimarySide().
+    if (getPref("followFocusPrimary") && state.primarySide !== side) {
+      state.primarySide = side;
+      if (state.syncEnabled) {
+        this.stopSyncPolling(tabID);
+        this.initSyncState(tabID);
+        this.startSyncPolling(tabID);
+      }
+    }
+
+    // Update scrollbar colors to reflect active/primary side
+    this.updateScrollbarColors(tabID);
+
+    // Skip context pane update when both sides belong to the same Zotero item
+    if (state.leftParentItemID === state.rightParentItemID) return;
+
+    const parentItemID =
+      side === "left" ? state.leftParentItemID : state.rightParentItemID;
+    this.updateContextPane(tabID, win, parentItemID);
+  }
+
+  /**
    * Set up focus/click listeners for a single browser to handle context pane switching.
    * Reusable for both initial setup and secondary PDF replacement.
    * Includes all guard conditions to prevent redundant "Section item data changed" events.
@@ -5287,46 +5460,19 @@ export class SplitViewFactory {
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;
 
-    // Handle focus change with all necessary guards
-    const handleFocus = () => {
-      const s = self.stateMap.get(tabID);
-      if (!s) return;
-      if (s.activeSide === side) return; // Already active - avoid redundant updates
-
-      s.activeSide = side;
-
-      // Auto-switch primary when followFocusPrimary preference is enabled.
-      // Directly set state to avoid notification popup from setPrimarySide().
-      if (getPref("followFocusPrimary") && s.primarySide !== side) {
-        s.primarySide = side;
-        // Restart sync with new primary if enabled
-        if (s.syncEnabled) {
-          self.stopSyncPolling(tabID);
-          self.initSyncState(tabID);
-          self.startSyncPolling(tabID);
-        }
-      }
-
-      // Update scrollbar colors to reflect active/primary side
-      self.updateScrollbarColors(tabID);
-
-      // Skip context pane update when both sides belong to the same
-      // Zotero item (same parentItemID), to avoid redundant updates
-      // that cause "Section item data changed" log spam
-      if (s.leftParentItemID === s.rightParentItemID) return;
-
-      const parentItemID =
-        side === "left" ? s.leftParentItemID : s.rightParentItemID;
-      self.updateContextPane(tabID, win, parentItemID);
-    };
-
     // IMPORTANT: Wrap handlers in setTimeout to run asynchronously.
     // Zotero's internal reader handlers (mouse events, etc.) may be running synchronously,
     // and accessing certain properties or layout immediately after can cause errors
     // like "Uncaught TypeError: can't access property 'rects', pointPosition is null".
     // By yielding to the event loop, we ensure Zotero's internal logic completes first.
-    const clickHandler = () => win.setTimeout(handleFocus, 0);
-    const focusHandler = () => win.setTimeout(handleFocus, 0);
+    const scheduleActivation = () =>
+      win.setTimeout(() => {
+        self.activateSide(tabID, side, win);
+      }, 0);
+    const clickHandler = () => scheduleActivation();
+    const focusHandler = () => scheduleActivation();
+    // Context-menu open is also treated as a side activation by design.
+    const contextMenuHandler = () => scheduleActivation();
 
     this.trackEventListener(
       state,
@@ -5340,6 +5486,13 @@ export class SplitViewFactory {
       browser,
       "focus",
       focusHandler as EventListener,
+      true,
+    );
+    this.trackEventListener(
+      state,
+      browser,
+      "contextmenu",
+      contextMenuHandler as EventListener,
       true,
     );
   }

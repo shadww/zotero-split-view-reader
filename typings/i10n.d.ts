@@ -39,6 +39,7 @@ export type FluentMessageId =
   | 'splitview-closed'
   | 'splitview-command-label'
   | 'splitview-dialog-title'
+  | 'splitview-last-page-reached'
   | 'splitview-loaded'
   | 'splitview-menu-label'
   | 'splitview-no-open-pdf'
