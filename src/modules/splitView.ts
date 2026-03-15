@@ -1375,6 +1375,42 @@ export class SplitViewFactory {
   }
 
   /**
+   * Rewrite a split tab's transient tab data so closing it records a normal
+   * reader tab for the side that is actually being closed. This keeps
+   * Ctrl+Shift+T aligned with the user's intent.
+   */
+  private static prepareTabDataForSingleReaderClose(
+    tabID: string,
+    itemID: number,
+  ) {
+    try {
+      const win = Zotero.getMainWindow();
+      const Zotero_Tabs = (win as any).Zotero_Tabs;
+      const currentTab = Zotero_Tabs._getTab(tabID)?.tab;
+
+      // setTabData() merges, so remove split-view-only fields first.
+      if (currentTab?.data) {
+        delete currentTab.data.leftItemID;
+        delete currentTab.data.rightItemID;
+        delete currentTab.data.isSplitView;
+        delete currentTab.data.isSamePDF;
+        delete currentTab.data.splitRatio;
+        delete currentTab.data.primarySide;
+        delete currentTab.data.activeSide;
+        delete currentTab.data.syncEnabled;
+      }
+
+      Zotero_Tabs.setTabData(tabID, {
+        itemID,
+      });
+    } catch (e) {
+      Zotero.debug(
+        `Split view: Failed to prepare normal reader tab data for close: ${e}`,
+      );
+    }
+  }
+
+  /**
    * Determine which side (left/right) a reader belongs to based on itemID
    */
   private static getReaderSide(
@@ -4521,6 +4557,7 @@ export class SplitViewFactory {
       keepLeft = sideToClose === "right";
     }
     const keepItemID = keepLeft ? state.leftItemID : state.rightItemID;
+    const closedItemID = keepLeft ? state.rightItemID : state.leftItemID;
 
     // 2. Save current view states to disk before closing
     let leftCurrentState: any = null;
@@ -4570,7 +4607,9 @@ export class SplitViewFactory {
       Zotero_Tabs.select(keepTarget.tabID);
     }
 
-    // 4. Close current split tab after the kept reader is already ready
+    // 4. Rewrite the closing tab as a normal reader for the side being closed,
+    // then close the split tab after the kept reader is already ready.
+    this.prepareTabDataForSingleReaderClose(tabID, closedItemID);
     Zotero_Tabs.close(tabID);
 
     await this.waitForTabClosed(tabID);
