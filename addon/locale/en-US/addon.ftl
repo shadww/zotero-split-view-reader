@@ -18,9 +18,6 @@ splitview-no-open-pdf = No open PDF found
 splitview-close-menu-label = Close This View
 splitview-searching = Searching PDFs...
 splitview-not-found = No PDF found
-splitview-sync-actions = Actions Sync
-splitview-sync-enabled = Actions sync enabled
-splitview-sync-disabled = Actions sync disabled
 splitview-set-primary =
     { $state ->
         [current] Unset Primary View

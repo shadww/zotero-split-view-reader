@@ -8,7 +8,6 @@ declare namespace _ZoteroTypes {
   interface Prefs {
     PluginPrefsMap: {
       "followFocusPrimary": boolean;
-      "syncEnabled": boolean;
       "splitTabsTitle": string;
       "primaryScrollbarR": number;
       "primaryScrollbarG": number;

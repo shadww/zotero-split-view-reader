@@ -18,9 +18,6 @@ splitview-no-open-pdf = 未找到已打开的 PDF
 splitview-close-menu-label = 关闭此视图
 splitview-searching = 搜索 PDF 中...
 splitview-not-found = 未找到 PDF
-splitview-sync-actions = 操作同步
-splitview-sync-enabled = 操作同步已启用
-splitview-sync-disabled = 操作同步已禁用
 splitview-set-primary =
     { $state ->
         [current] 取消主视图

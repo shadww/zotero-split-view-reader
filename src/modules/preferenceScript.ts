@@ -78,15 +78,6 @@ function bindPrefEvents() {
     setPref("followFocusPrimary", target.checked);
   });
 
-  // Checkbox: Actions Sync
-  const syncEnabledCheckbox = doc.querySelector(
-    `#zotero-prefpane-${config.addonRef}-sync-enabled`,
-  ) as HTMLInputElement | null;
-  syncEnabledCheckbox?.addEventListener("command", (e: Event) => {
-    const target = e.target as HTMLInputElement;
-    setPref("syncEnabled", target.checked);
-  });
-
   const splitTabsTitleMenulist = doc.querySelector(
     `#zotero-prefpane-${config.addonRef}-split-tabs-title`,
   ) as (Element & { value: SplitTabsTitleMode }) | null;
