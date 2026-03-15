@@ -2,7 +2,7 @@
   "name": "zotero-plugin-template",
   "type": "module",
   "version": "1.0.0",
-  "description": "Enables split-view reading different PDFs with synchronized controls",
+  "description": "Adds split-view reading for same or different PDFs with optional primary-view action sync",
   "config": {
     "addonName": "Split-View Reader",
     "addonID": "zotero-split-view-reader@fuling.lin.at.outlook.com",

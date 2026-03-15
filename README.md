@@ -7,17 +7,17 @@
 
 ---
 
-**Split-View Reader** is a plugin for [Zotero 8](https://www.zotero.org/) that enables split-view reading different PDFs with synchronized controls.
+**Split-View Reader** is a plugin for [Zotero 8](https://www.zotero.org/) that enables split-view reading same or different PDFs with optional primary-view action sync.
 
 <p align="center">
-  <img src="doc/example.png" width="90%" alt="Example" />
+  <img src="doc/example.png" width="1500" alt="Example" />
 </p>
 
 ## Features
 
-- **Split-View Mode**: View same/different PDF document in two synchronized panes side by side
-- **Synchronized Scrolling**: Scroll both views simultaneously for seamless reading
-- **Independent Navigation**: Each pane can also be navigated independently when needed
+- **Split-View Mode**: View the same or different PDFs side by side in a single Zotero tab
+- **Synchronized Scroll/Zoom**: When a primary view is set, the other pane follows it during scrolling and zooming via toolbar buttons or the mouse wheel
+- **Independent Navigation**: Clear the primary view to turn sync off and navigate both panes independently
 - **Seamless Integration**: Works naturally within Zotero's reader interface
 
 ## Installation
@@ -33,32 +33,36 @@
 
 Press `Shift + P` to open Zotero's command palette, then select **Split View Reader** to start split-view mode.
 
-<img src="doc/command-example.png" width="80%" alt="Command Palette" />
+<p align="center">
+  <img src="doc/command-example.png" width="650" alt="Command Palette" />
+</p>
 
 ### Right-Click Context Menu
 
-Right-click in either pane to access these options:
+Right-click in either pane to access these options in an open split-view reader tab:
 
-| Option                      | Description                                      |
-| --------------------------- | ------------------------------------------------ |
-| **Close Split-View Reader** | Exit split-view mode                             |
-| **Separate Views**          | Restore the split readers as regular Zotero tabs |
-| **Primary Window**          | Set current pane as the primary (sync source)    |
-| **Open Another PDF**        | Replace secondary pane with a different PDF      |
-| **Swap PDFs**               | Swap the PDFs between left and right panes       |
-| **Sync Position & Zoom**    | Manually sync position and zoom level            |
+| Option                                       | Description                                                  |
+| -------------------------------------------- | ------------------------------------------------------------ |
+| **Swap PDFs**                                | Swap the PDFs between left and right panes                   |
+| **Separate Views**                           | Restore the split readers as regular Zotero tabs             |
+| **Close This View**                          | Close the right-clicked pane                                 |
+| **Set as Primary View / Unset Primary View** | Set or clear primary control for the right-clicked pane      |
+| **Change PDF in This View**                  | Replace the PDF in the right-clicked pane                    |
+| **Match This View to Left/Right View**       | Sync the right-clicked pane's position and zoom to the other |
 
-<p align="left">
-  <img src="doc/right-click1.png" width="18%" style="vertical-align: top" />
-  <img src="doc/right-click2.png" width="23%" style="vertical-align: top" />
-</p>
+Some notes:
+
+- Zooming with `Ctrl + mouse wheel` stays independently controlled in the current view and does not trigger sync.
+- Action sync is active only while a primary view exists. Use **Unset Primary View** from the right-click menu to turn sync off.
 
 ### Settings
 
 Go to `Edit` → `Settings` → Click Split-View Reader to configure:
 
-- **Show Split Tabs as**: Choose how split-view tab titles are displayed without affecting normal Zotero tabs
-- **Follow mouse focus to switch primary window**: Automatically switch the sync source when focus changes
-- **Actions Sync**: Control whether scroll and page navigation stay synchronized
+- **Follow mouse focus to switch primary view**: When enabled, focus changes can move the primary view between panes that already have an active primary view.
+  > If no primary view is set, focus changes do not recreate one; use **Set as Primary View** to enable sync again.
+- **Show Split Tabs as**: Choose how split-view tab titles are displayed without affecting normal Zotero tabs.
 
-<img src="doc/svreader-setting.png" width="80%" alt="Settings" />
+<p align="center">
+  <img src="doc/svreader-setting.png" width="700" alt="Settings" />
+</p>
