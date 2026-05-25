@@ -16,3 +16,5 @@ tsconfig.tsbuildinfo
 .scaffold
 build
 logs
+
+AGENTS.md

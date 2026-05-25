@@ -36,6 +36,11 @@ interface SplitTabState {
   rightParentItemID: number;
   primarySide: "left" | "right" | null;
   activeSide: "left" | "right";
+  readAloudSide: "left" | "right" | null;
+  readAloudStatuses: {
+    left: any | null;
+    right: any | null;
+  };
   scrollHandler: (() => void) | null;
   scrollHandlerBrowser: XULBrowserElement | null;
   lastPrimaryScroll: { top: number; left: number } | null;
@@ -98,12 +103,376 @@ export class SplitViewFactory {
   ];
   /** Preference observer ID for split tab titles - renames open split view tabs */
   private static splitTabsTitlePrefObserverID: symbol | null = null;
+  /** Preference observer ID for Read Aloud voices - updates open split readers */
+  private static readAloudVoicesPrefObserverID: symbol | null = null;
+  /** Original IOUtils.writeJSON before installing the Read Aloud enabled voices hook */
+  private static originalIOUtilsWriteJSON: any = null;
+  /** Read Aloud first-run dialog is global per voice language, even when two split readers initialize together. */
+  private static readAloudFirstRunDialogLangs: Set<string> = new Set();
+
+  private static getReadAloudEnabledVoicesPath(): string | null {
+    try {
+      return PathUtils.join(
+        (Zotero as any).Profile.dir,
+        "readAloudEnabledVoices.json",
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  private static isReadAloudAvailable(): boolean {
+    try {
+      return (
+        !!(Zotero as any).Profile?.dir &&
+        !!(Zotero.Sync as any)?.Runner &&
+        typeof (Zotero.Sync as any)?.Runner.getAPIClient === "function" &&
+        typeof Zotero.getMainWindow()?.openDialog === "function"
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  private static getReadAloudVoices(): any {
+    try {
+      return JSON.parse(String(Zotero.Prefs.get("reader.readAloudVoices")));
+    } catch {
+      return {};
+    }
+  }
+
+  private static forEachSplitReadAloudReader(
+    callback: (
+      reader: any,
+      targetWindow: Window,
+      browser: XULBrowserElement,
+    ) => void,
+  ): void {
+    for (const state of this.stateMap.values()) {
+      if (state.isCleaningUp) continue;
+      for (const browser of [state.leftBrowser, state.rightBrowser]) {
+        try {
+          const reader = this.getInternalReaderFromBrowser(browser);
+          const targetWindow = browser.contentWindow;
+          if (reader && targetWindow) {
+            callback(reader, targetWindow, browser);
+          }
+        } catch {
+          // Reader may be gone during cleanup
+        }
+      }
+    }
+  }
+
+  private static syncReadAloudVoicesToSplitReaders(voices: any): void {
+    this.forEachSplitReadAloudReader((reader, targetWindow) => {
+      try {
+        reader?.setReadAloudVoices?.(
+          Components.utils.cloneInto(voices, targetWindow),
+        );
+      } catch {
+        // Ignore split readers that are unloading
+      }
+    });
+  }
+
+  private static syncReadAloudEnabledVoicesToNormalReaders(voices: any): void {
+    try {
+      const readers = (Zotero.Reader as any)._readers || [];
+      for (const reader of readers) {
+        try {
+          reader?._handleReadAloudEnabledVoicesChange?.(voices);
+        } catch (e) {
+          Zotero.logError(e as Error);
+        }
+      }
+    } catch {
+      // Ignore if Zotero.Reader internals are unavailable
+    }
+  }
+
+  private static syncReadAloudEnabledVoicesToSplitReaders(voices: any): void {
+    this.forEachSplitReadAloudReader((reader, targetWindow) => {
+      if (reader?.setReadAloudEnabledVoices) {
+        reader.setReadAloudEnabledVoices(
+          Components.utils.cloneInto(voices, targetWindow),
+        );
+      }
+    });
+  }
+
+  private static installReadAloudEnabledVoicesWriteHook(): void {
+    if (this.originalIOUtilsWriteJSON) return;
+
+    const originalWriteJSON = IOUtils.writeJSON;
+    this.originalIOUtilsWriteJSON = originalWriteJSON;
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const self = this;
+
+    (IOUtils as any).writeJSON = async function (
+      path: string,
+      data: any,
+      ...args: any[]
+    ) {
+      const result = await originalWriteJSON.call(this, path, data, ...args);
+      try {
+        const enabledVoicesPath = self.getReadAloudEnabledVoicesPath();
+        if (enabledVoicesPath && String(path) === enabledVoicesPath) {
+          self.syncReadAloudEnabledVoicesToNormalReaders(data);
+          self.syncReadAloudEnabledVoicesToSplitReaders(data);
+        }
+      } catch (e) {
+        Zotero.debug(
+          `Split view: readAloudEnabledVoices write hook failed: ${e}`,
+        );
+      }
+      return result;
+    };
+  }
+
+  private static uninstallReadAloudEnabledVoicesWriteHook(): void {
+    if (!this.originalIOUtilsWriteJSON) return;
+    (IOUtils as any).writeJSON = this.originalIOUtilsWriteJSON;
+    this.originalIOUtilsWriteJSON = null;
+  }
+
+  private static setReadAloudVoice({
+    lang,
+    region,
+    voice,
+    speed,
+    tier,
+  }: any): void {
+    const existing = this.getReadAloudVoices()[lang] || {};
+    const tierVoices = { ...(existing.tierVoices || {}) };
+    if (tier) {
+      delete tierVoices[tier];
+      tierVoices[tier] = voice;
+    }
+    const voices = {
+      ...this.getReadAloudVoices(),
+      [lang]: { region, voice, speed, tierVoices },
+    };
+    Zotero.Prefs.set("reader.readAloudVoices", JSON.stringify(voices));
+    this.syncReadAloudVoicesToSplitReaders(voices);
+    this.readAloudFirstRunDialogLangs.delete(lang);
+  }
+
+  private static hasReadAloudVoice(lang: string): boolean {
+    const voiceData = this.getReadAloudVoices()[lang];
+    return !!voiceData?.voice;
+  }
+
+  private static async getReadAloudEnabledVoices(): Promise<any> {
+    const path = this.getReadAloudEnabledVoicesPath();
+    if (!path) return {};
+    try {
+      return await IOUtils.readJSON(path);
+    } catch {
+      return {};
+    }
+  }
+
+  private static async setReadAloudEnabledVoices(
+    enabledVoicesByLang: Record<string, any>,
+  ): Promise<void> {
+    const path = this.getReadAloudEnabledVoicesPath();
+    if (!path) return;
+
+    const existing = await this.getReadAloudEnabledVoices();
+    for (const [lang, enabledByTier] of Object.entries(enabledVoicesByLang)) {
+      existing[lang] = { ...(existing[lang] || {}), ...enabledByTier };
+    }
+    await IOUtils.writeJSON(path, existing);
+
+    this.syncReadAloudEnabledVoicesToNormalReaders(existing);
+    this.syncReadAloudEnabledVoicesToSplitReaders(existing);
+  }
+
+  private static getReadAloudRemoteInterface(targetWindow: Window): any {
+    try {
+      const mainWindow = Zotero.getMainWindow() as any;
+      if (!mainWindow?.caches || !(Zotero.Sync as any)?.Runner) return null;
+
+      const audioCache = mainWindow.caches.open("read-aloud");
+      return {
+        getVoices: () => {
+          return new (targetWindow as any).Promise(async (resolve: any) => {
+            const apiKey = await (Zotero.Sync as any).Data.Local.getAPIKey();
+            const client = (Zotero.Sync as any).Runner.getAPIClient({ apiKey });
+            const result = await client.getReadAloudVoices();
+            resolve(Components.utils.cloneInto(result, targetWindow));
+          });
+        },
+        getAudio: (segment: any, voice: any) => {
+          return new (targetWindow as any).Promise(async (resolve: any) => {
+            const cacheURL =
+              "https://read-aloud.zotero.invalid/audio?" +
+              new URLSearchParams({ voice: voice.id, text: segment.text });
+            let cache: Cache | null = null;
+            try {
+              cache = await audioCache;
+              if (!cache) return;
+              const cached = await cache.match(cacheURL);
+              if (cached) {
+                resolve(
+                  Components.utils.cloneInto(
+                    { audio: await cached.blob() },
+                    targetWindow,
+                  ),
+                );
+                return;
+              }
+            } catch (e) {
+              Zotero.logError(e as Error);
+            }
+
+            const apiKey =
+              segment === "sample"
+                ? null
+                : await (Zotero.Sync as any).Data.Local.getAPIKey();
+            const client = (Zotero.Sync as any).Runner.getAPIClient({ apiKey });
+            const result = await client.getReadAloudAudio(segment, voice.id);
+            if (result.audio && cache) {
+              try {
+                await cache.put(cacheURL, new Response(result.audio));
+              } catch (e) {
+                Zotero.logError(e as Error);
+              }
+            }
+            resolve(Components.utils.cloneInto(result, targetWindow));
+          });
+        },
+        getCreditsRemaining: () => {
+          return new (targetWindow as any).Promise(async (resolve: any) => {
+            const apiKey = await (Zotero.Sync as any).Data.Local.getAPIKey();
+            const client = (Zotero.Sync as any).Runner.getAPIClient({ apiKey });
+            resolve(
+              Components.utils.cloneInto(
+                await client.getReadAloudCreditsRemaining(),
+                targetWindow,
+              ),
+            );
+          });
+        },
+        resetCredits: () => {
+          return new (targetWindow as any).Promise(async (resolve: any) => {
+            const apiKey = await (Zotero.Sync as any).Data.Local.getAPIKey();
+            const client = (Zotero.Sync as any).Runner.getAPIClient({ apiKey });
+            resolve(
+              Components.utils.cloneInto(
+                await client.resetReadAloudCredits(),
+                targetWindow,
+              ),
+            );
+          });
+        },
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private static openReadAloudFirstRunDialog(
+    browser: XULBrowserElement,
+    lang: string,
+    ftl: string[],
+  ): void {
+    if (
+      !this.getActiveSplitReaderInfoByBrowser(browser) ||
+      this.hasReadAloudVoice(lang) ||
+      this.readAloudFirstRunDialogLangs.has(lang)
+    ) {
+      return;
+    }
+    this.readAloudFirstRunDialogLangs.add(lang);
+
+    setTimeout(async () => {
+      try {
+        if (!this.getActiveSplitReaderInfoByBrowser(browser)) return;
+        const win = browser.contentWindow;
+        if (!win || this.hasReadAloudVoice(lang)) return;
+        const io: any = {
+          dataIn: {
+            lang,
+            readAloudEnabledVoices: await this.getReadAloudEnabledVoices(),
+            ftl,
+            getReadAloudRemoteInterface: (targetWindow: Window) =>
+              this.getReadAloudRemoteInterface(targetWindow),
+          },
+          dataOut: null,
+          openVoicesDialog: ({ tier }: any) => {
+            setTimeout(async () => {
+              if (!this.getActiveSplitReaderInfoByBrowser(browser)) return;
+              await this.openReadAloudVoicesDialog(browser, lang, tier, ftl);
+              if (!this.getActiveSplitReaderInfoByBrowser(browser)) return;
+              io.updateEnabledVoices?.(await this.getReadAloudEnabledVoices());
+            });
+          },
+        };
+        Zotero.getMainWindow().openDialog(
+          "chrome://zotero/content/readAloudFirstRunDialog.xhtml",
+          "",
+          "chrome,modal,centerscreen,resizable=no",
+          io,
+        );
+        if (io.dataOut) {
+          if (!this.getActiveSplitReaderInfoByBrowser(browser)) return;
+          this.setReadAloudVoice(io.dataOut);
+          this.getInternalReaderFromBrowser(browser)?.toggleReadAloudPopup?.(
+            true,
+          );
+        }
+      } finally {
+        this.readAloudFirstRunDialogLangs.delete(lang);
+      }
+    });
+  }
+
+  private static async openReadAloudVoicesDialog(
+    browser: XULBrowserElement,
+    lang: string,
+    tier: string,
+    ftl: string[],
+  ): Promise<void> {
+    if (!this.getActiveSplitReaderInfoByBrowser(browser)) return;
+    const io: any = {
+      dataIn: {
+        lang,
+        tier,
+        readAloudEnabledVoices: await this.getReadAloudEnabledVoices(),
+        ftl,
+        getReadAloudRemoteInterface: (targetWindow: Window) =>
+          this.getReadAloudRemoteInterface(targetWindow),
+      },
+      dataOut: null,
+    };
+    Zotero.getMainWindow().openDialog(
+      "chrome://zotero/content/readAloudVoicesDialog.xhtml",
+      "",
+      "chrome,modal,centerscreen,resizable=no",
+      io,
+    );
+    if (io.dataOut) {
+      if (!this.getActiveSplitReaderInfoByBrowser(browser)) return;
+      await this.setReadAloudEnabledVoices(io.dataOut);
+    }
+  }
 
   /**
    * Look up state for a specific tab
    */
   private static getState(tabID: string): SplitTabState | null {
     return this.stateMap.get(tabID) ?? null;
+  }
+
+  private static hasActiveSplitState(
+    tabID: string | null | undefined,
+  ): boolean {
+    if (!tabID) return false;
+    const state = this.stateMap.get(tabID);
+    return !!state && !state.isCleaningUp;
   }
 
   /**
@@ -874,9 +1243,40 @@ export class SplitViewFactory {
       (Zotero_Tabs as any)._originalReaderGetTitleHook =
         Zotero_Tabs.tabHooks?.getTitle?.reader;
     }
+    if (!(Zotero_Tabs as any)._originalReaderToggleAudioHook) {
+      (Zotero_Tabs as any)._originalReaderToggleAudioHook =
+        Zotero_Tabs.tabHooks?.toggleAudio?.reader;
+    }
+    if (
+      !(Zotero_Tabs as any)._originalSetAudioStatusForSplitView &&
+      typeof Zotero_Tabs.setAudioStatus === "function"
+    ) {
+      (Zotero_Tabs as any)._originalSetAudioStatusForSplitView =
+        Zotero_Tabs.setAudioStatus;
+    }
 
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;
+
+    const originalSetAudioStatus = (Zotero_Tabs as any)
+      ._originalSetAudioStatusForSplitView;
+    if (typeof originalSetAudioStatus === "function") {
+      Zotero_Tabs.setAudioStatus = function (id: string, status: any) {
+        if (status?.active && !status.paused) {
+          try {
+            const { tab } = this._getTab(id);
+            if (!tab?.data?.isSplitView || !self.hasActiveSplitState(tab.id)) {
+              self.pauseAllSplitReadAloud();
+            }
+          } catch (e) {
+            Zotero.debug(
+              `Split view: pausing split Read Aloud from normal reader failed: ${e}`,
+            );
+          }
+        }
+        return originalSetAudioStatus.call(this, id, status);
+      };
+    }
 
     // Override method
     Zotero_Tabs.getTabIDByItemID = function (itemID: number) {
@@ -902,12 +1302,26 @@ export class SplitViewFactory {
 
     if (Zotero_Tabs.tabHooks?.getTitle?.reader) {
       Zotero_Tabs.tabHooks.getTitle.reader = async function (tab: any) {
-        if (tab?.data?.isSplitView) {
+        if (tab?.data?.isSplitView && self.hasActiveSplitState(tab.id)) {
           return self.getSplitViewTitleForTab(tab);
         }
 
         const original = (Zotero_Tabs as any)._originalReaderGetTitleHook;
         return typeof original === "function" ? original.call(this, tab) : "";
+      };
+    }
+
+    if (Zotero_Tabs.tabHooks?.toggleAudio?.reader) {
+      Zotero_Tabs.tabHooks.toggleAudio.reader = function (tab: any) {
+        if (tab?.data?.isSplitView && self.hasActiveSplitState(tab.id)) {
+          self.toggleActiveReadAloud(tab.id);
+          return;
+        }
+
+        const original = (Zotero_Tabs as any)._originalReaderToggleAudioHook;
+        if (typeof original === "function") {
+          return original.call(this, tab);
+        }
       };
     }
   }
@@ -1038,6 +1452,14 @@ export class SplitViewFactory {
       },
       true,
     );
+
+    this.readAloudVoicesPrefObserverID = Zotero.Prefs.registerObserver(
+      "reader.readAloudVoices",
+      () => {
+        this.syncReadAloudVoicesToSplitReaders(this.getReadAloudVoices());
+      },
+    );
+    this.installReadAloudEnabledVoicesWriteHook();
   }
 
   /**
@@ -1177,6 +1599,17 @@ export class SplitViewFactory {
       }
       this.splitTabsTitlePrefObserverID = null;
     }
+    if (this.readAloudVoicesPrefObserverID) {
+      try {
+        Zotero.Prefs.unregisterObserver(this.readAloudVoicesPrefObserverID);
+      } catch (e) {
+        Zotero.debug(
+          `Split view: unregisterAll - unregisterObserver(readAloudVoices) failed: ${e}`,
+        );
+      }
+      this.readAloudVoicesPrefObserverID = null;
+    }
+    this.uninstallReadAloudEnabledVoicesWriteHook();
 
     // Restore Zotero_Tabs.getTabIDByItemID to avoid holding references and stale tab IDs
     this.unregisterTabLookup();
@@ -1212,6 +1645,21 @@ export class SplitViewFactory {
       ) {
         Zotero_Tabs.tabHooks.getTitle.reader = originalGetTitle;
         (Zotero_Tabs as any)._originalReaderGetTitleHook = undefined;
+      }
+      const originalToggleAudio = (Zotero_Tabs as any)
+        ._originalReaderToggleAudioHook;
+      if (
+        typeof originalToggleAudio === "function" &&
+        Zotero_Tabs.tabHooks?.toggleAudio
+      ) {
+        Zotero_Tabs.tabHooks.toggleAudio.reader = originalToggleAudio;
+        (Zotero_Tabs as any)._originalReaderToggleAudioHook = undefined;
+      }
+      const originalSetAudioStatus = (Zotero_Tabs as any)
+        ._originalSetAudioStatusForSplitView;
+      if (typeof originalSetAudioStatus === "function") {
+        Zotero_Tabs.setAudioStatus = originalSetAudioStatus;
+        (Zotero_Tabs as any)._originalSetAudioStatusForSplitView = undefined;
       }
     } catch (e) {
       Zotero.debug(`Split view: unregisterTabLookup failed: ${e}`);
@@ -1440,6 +1888,229 @@ export class SplitViewFactory {
     return null;
   }
 
+  private static getReaderSideByBrowser(
+    tabID: string,
+    browser: XULBrowserElement,
+  ): "left" | "right" | null {
+    const state = this.stateMap.get(tabID);
+    if (!state) return null;
+    if (browser === state.leftBrowser) return "left";
+    if (browser === state.rightBrowser) return "right";
+    return null;
+  }
+
+  private static getActiveSplitReaderInfoByBrowser(
+    browser: XULBrowserElement,
+  ): { state: SplitTabState; side: "left" | "right" } | null {
+    for (const state of this.stateMap.values()) {
+      if (state.isCleaningUp) continue;
+      if (browser === state.leftBrowser) {
+        return { state, side: "left" };
+      }
+      if (browser === state.rightBrowser) {
+        return { state, side: "right" };
+      }
+    }
+    return null;
+  }
+
+  private static getBrowserBySide(
+    state: SplitTabState,
+    side: "left" | "right",
+  ): XULBrowserElement {
+    return side === "left" ? state.leftBrowser : state.rightBrowser;
+  }
+
+  private static setSplitTabAudioStatus(tabID: string, status: any): void {
+    try {
+      const win = Zotero.getMainWindow();
+      const Zotero_Tabs = (win as any).Zotero_Tabs;
+      if (typeof Zotero_Tabs?.setAudioStatus === "function") {
+        Zotero_Tabs.setAudioStatus(tabID, status);
+      }
+    } catch (e) {
+      Zotero.debug(`Split view: setSplitTabAudioStatus failed: ${e}`);
+    }
+  }
+
+  private static pauseReadAloudInBrowser(
+    browser: XULBrowserElement,
+    paused = true,
+  ): void {
+    try {
+      const reader = this.getInternalReaderFromBrowser(browser);
+      reader?.toggleReadAloudPaused?.(paused);
+    } catch (e) {
+      Zotero.debug(`Split view: pauseReadAloudInBrowser failed: ${e}`);
+    }
+  }
+
+  private static pauseAllSplitReadAloud(): void {
+    for (const state of this.stateMap.values()) {
+      if (state.isCleaningUp) continue;
+      for (const browser of [state.leftBrowser, state.rightBrowser]) {
+        this.pauseReadAloudInBrowser(browser, true);
+      }
+    }
+  }
+
+  private static pauseReadAloudExcept(
+    tabID: string,
+    activeBrowser: XULBrowserElement,
+  ): void {
+    const activeState = this.stateMap.get(tabID);
+    if (!activeState || activeState.isCleaningUp) return;
+
+    for (const state of this.stateMap.values()) {
+      if (state.isCleaningUp) continue;
+      for (const browser of [state.leftBrowser, state.rightBrowser]) {
+        if (browser !== activeBrowser) {
+          this.pauseReadAloudInBrowser(browser, true);
+        }
+      }
+    }
+
+    try {
+      const readers = (Zotero.Reader as any)._readers || [];
+      for (const reader of readers) {
+        try {
+          reader?.toggleReadAloudPaused?.(true);
+        } catch (e) {
+          Zotero.logError(e as Error);
+        }
+      }
+    } catch {
+      // Ignore if Zotero.Reader internals are unavailable
+    }
+  }
+
+  private static handleReadAloudStatus(
+    tabID: string,
+    browser: XULBrowserElement,
+    status: any,
+  ): void {
+    const state = this.stateMap.get(tabID);
+    if (!state || state.isCleaningUp) return;
+
+    const side = this.getReaderSideByBrowser(tabID, browser);
+    if (side) {
+      state.readAloudStatuses[side] = status || null;
+
+      const otherSide = side === "left" ? "right" : "left";
+      const otherStatus = state.readAloudStatuses[otherSide];
+      const sidePlaying = !!status?.active && !status.paused;
+      const otherPlaying = !!otherStatus?.active && !otherStatus.paused;
+
+      if (sidePlaying) {
+        state.readAloudSide = side;
+      } else if (!status?.active) {
+        if (state.readAloudSide === side) {
+          state.readAloudSide = otherStatus?.active ? otherSide : null;
+        }
+      } else if (!otherPlaying && !state.readAloudSide) {
+        state.readAloudSide = side;
+      } else if (otherPlaying && state.readAloudSide === side) {
+        state.readAloudSide = otherSide;
+      }
+    }
+
+    if (status?.active && !status.paused) {
+      try {
+        browser.docShellIsActive = true;
+      } catch {
+        // Ignore browser activation errors
+      }
+      this.pauseReadAloudExcept(tabID, browser);
+    }
+
+    this.setSplitTabAudioStatus(
+      tabID,
+      this.getSplitTabReadAloudStatus(state, status),
+    );
+  }
+
+  private static clearReadAloudStateForSide(
+    state: SplitTabState,
+    side: "left" | "right",
+  ): void {
+    state.readAloudStatuses[side] = null;
+
+    if (state.readAloudSide === side) {
+      const otherSide = side === "left" ? "right" : "left";
+      state.readAloudSide = state.readAloudStatuses[otherSide]?.active
+        ? otherSide
+        : null;
+    }
+
+    this.setSplitTabAudioStatus(
+      state.tabID,
+      this.getSplitTabReadAloudStatus(state, {
+        active: false,
+        paused: false,
+      }),
+    );
+  }
+
+  private static getSplitTabReadAloudStatus(
+    state: SplitTabState,
+    fallbackStatus: any,
+  ): any {
+    const sides: ("left" | "right")[] = ["left", "right"];
+    const playingSide = sides.find((side) => {
+      const status = state.readAloudStatuses[side];
+      return !!status?.active && !status.paused;
+    });
+    if (playingSide) return state.readAloudStatuses[playingSide];
+
+    if (state.readAloudSide) {
+      const status = state.readAloudStatuses[state.readAloudSide];
+      if (status?.active) return status;
+    }
+
+    const activeReadAloudSide = sides.find((side) => {
+      const status = state.readAloudStatuses[side];
+      return !!status?.active;
+    });
+    if (activeReadAloudSide) {
+      return state.readAloudStatuses[activeReadAloudSide];
+    }
+
+    return fallbackStatus ?? { active: false, paused: false };
+  }
+
+  private static getReadAloudTargetSide(
+    state: SplitTabState,
+  ): "left" | "right" {
+    const sides: ("left" | "right")[] = ["left", "right"];
+    const playingSide = sides.find((side) => {
+      const status = state.readAloudStatuses[side];
+      return !!status?.active && !status.paused;
+    });
+    if (playingSide) return playingSide;
+    if (state.readAloudSide) return state.readAloudSide;
+
+    const activeReadAloudSide = sides.find((side) => {
+      const status = state.readAloudStatuses[side];
+      return !!status?.active;
+    });
+    return activeReadAloudSide ?? state.activeSide;
+  }
+
+  private static toggleActiveReadAloud(tabID: string): void {
+    const state = this.stateMap.get(tabID);
+    if (!state || state.isCleaningUp) return;
+
+    const browser = this.getBrowserBySide(
+      state,
+      this.getReadAloudTargetSide(state),
+    );
+    try {
+      this.getInternalReaderFromBrowser(browser)?.toggleReadAloudPaused?.();
+    } catch (e) {
+      Zotero.debug(`Split view: toggleActiveReadAloud failed: ${e}`);
+    }
+  }
+
   /**
    * Set which side is the primary (controller)
    */
@@ -1489,6 +2160,7 @@ export class SplitViewFactory {
     if (oldReader) {
       await this.closeReaderWithoutClosingTab(oldReader);
     }
+    this.clearReadAloudStateForSide(state, side);
 
     // Create new browser element
     const doc = oldBrowser.ownerDocument;
@@ -2078,6 +2750,11 @@ export class SplitViewFactory {
       rightParentItemID,
       primarySide: this.getDefaultPrimarySide(),
       activeSide: "left",
+      readAloudSide: null,
+      readAloudStatuses: {
+        left: null,
+        right: null,
+      },
       scrollHandler: null,
       scrollHandlerBrowser: null,
       lastPrimaryScroll: null,
@@ -2408,6 +3085,11 @@ export class SplitViewFactory {
       rightParentItemID: parentItemID, // Same parent
       primarySide: this.getDefaultPrimarySide(),
       activeSide: "left",
+      readAloudSide: null,
+      readAloudStatuses: {
+        left: null,
+        right: null,
+      },
       scrollHandler: null,
       scrollHandlerBrowser: null,
       lastPrimaryScroll: null,
@@ -3164,6 +3846,13 @@ export class SplitViewFactory {
     const itemRef = item;
     const browserRef = browser;
     const popupsetRef = popupset;
+    const readAloudEnabled = this.isReadAloudAvailable();
+    const readAloudEnabledVoices = readAloudEnabled
+      ? await this.getReadAloudEnabledVoices()
+      : {};
+    const readAloudRemoteInterface = readAloudEnabled
+      ? this.getReadAloudRemoteInterface(win)
+      : null;
 
     // Only show context pane toggle button on the RIGHT browser
     // The right reader's toggle controls the global context pane
@@ -3218,6 +3907,15 @@ export class SplitViewFactory {
       autoDisableTextTool: Zotero.Prefs.get("reader.autoDisableTool.text"),
       autoDisableImageTool: Zotero.Prefs.get("reader.autoDisableTool.image"),
       sidebarView: Zotero.Prefs.get("reader.lastSidebarTab"),
+      ...(readAloudEnabled
+        ? {
+            enableReadAloud: true,
+            readAloudVoices: this.getReadAloudVoices(),
+            readAloudEnabledVoices,
+            readAloudRemoteInterface,
+            loggedIn: !!(Zotero.Sync as any)?.Runner?.enabled,
+          }
+        : {}),
       // Pass viewState to restore position
       primaryViewState: viewState,
       // Required callbacks - defined as regular functions
@@ -3244,6 +3942,15 @@ export class SplitViewFactory {
             s.leftViewState = stateCopy;
           } else {
             s.rightViewState = stateCopy;
+          }
+          if (
+            self.shouldSyncLastReadAloudPositionFromBrowser(
+              s,
+              browserRef,
+              viewState,
+            )
+          ) {
+            self.syncLastReadAloudPositionToItem(itemRef, viewState);
           }
         }
         // Sync zoom when scale changes (toolbar zoom in/out)
@@ -3299,6 +4006,46 @@ export class SplitViewFactory {
           }, 50);
         }
       },
+      ...(readAloudEnabled
+        ? {
+            onSetReadAloudVoice: (data: any) => {
+              self.setReadAloudVoice(data);
+            },
+            onSetReadAloudEnabledVoices: async (data: any) => {
+              await self.setReadAloudEnabledVoices(data);
+            },
+            onSetReadAloudStatus: (status: any) => {
+              self.handleReadAloudStatus(tabID, browserRef, status);
+            },
+            onPurchaseReadAloudCredits: () => {
+              try {
+                const { ZOTERO_CONFIG } = ChromeUtils.importESModule(
+                  "resource://zotero/config.mjs",
+                ) as any;
+                const url = ZOTERO_CONFIG?.READ_ALOUD_URL;
+                if (url) Zotero.launchURL(url);
+              } catch {
+                // Ignore if config is unavailable
+              }
+            },
+            onLogIn: () => {
+              setTimeout(() =>
+                (Zotero.Utilities.Internal as any).openPreferences(
+                  "zotero-prefpane-account",
+                  { action: "logIn" },
+                ),
+              );
+            },
+            onOpenReadAloudFirstRunPopup: ({ lang }: any) => {
+              self.openReadAloudFirstRunDialog(browserRef, lang, ftl);
+            },
+            onOpenReadAloudVoicesPopup: ({ lang, tier }: any) => {
+              setTimeout(() => {
+                self.openReadAloudVoicesDialog(browserRef, lang, tier, ftl);
+              });
+            },
+          }
+        : {}),
     };
 
     // Clone entire config once with wrapReflectors and cloneFunctions
@@ -3549,22 +4296,69 @@ export class SplitViewFactory {
    * Get stored view state from disk for an attachment item
    */
   private static async getStoredViewState(item: Zotero.Item): Promise<any> {
+    let state: any = null;
     try {
       const dir = Zotero.Attachments.getStorageDirectory(item);
       const stateFile = PathUtils.join(dir.path, ".zotero-reader-state");
       if (await IOUtils.exists(stateFile)) {
-        return await IOUtils.readJSON(stateFile);
+        state = await IOUtils.readJSON(stateFile);
       }
     } catch {
       // Ignore errors
     }
-    return null;
+
+    const lastReadAloudPosition = this.getAttachmentLastReadAloudPosition(item);
+    if (state) {
+      state.lastReadAloudPosition = lastReadAloudPosition;
+    } else if (lastReadAloudPosition !== null) {
+      state = { lastReadAloudPosition };
+    }
+    return state;
   }
 
   /**
    * Save view state to disk for an attachment item
    * Mirrors Zotero's ReaderInstance._setState behavior
    */
+  private static getAttachmentLastReadAloudPosition(item: Zotero.Item): any {
+    try {
+      return (item as any).getAttachmentLastReadAloudPosition?.() ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  private static syncLastReadAloudPositionToItem(
+    item: Zotero.Item,
+    viewState: any,
+  ): void {
+    if (!viewState || !("lastReadAloudPosition" in viewState)) return;
+
+    try {
+      const newPosition = viewState.lastReadAloudPosition ?? null;
+      const currentPosition = this.getAttachmentLastReadAloudPosition(item);
+      if (JSON.stringify(newPosition) !== JSON.stringify(currentPosition)) {
+        (item as any).setAttachmentLastReadAloudPosition?.(newPosition);
+      }
+    } catch (e) {
+      Zotero.debug(`Split view: Failed to save Read Aloud position: ${e}`);
+    }
+  }
+
+  private static shouldSyncLastReadAloudPositionFromBrowser(
+    state: SplitTabState,
+    browser: XULBrowserElement,
+    viewState: any,
+  ): boolean {
+    if (!viewState || !("lastReadAloudPosition" in viewState)) return false;
+
+    const side = this.getReaderSideByBrowser(state.tabID, browser);
+    if (!side) return false;
+
+    const status = state.readAloudStatuses[side];
+    return state.readAloudSide === side && !!status?.active && !status.paused;
+  }
+
   private static async saveViewStateToDisk(
     itemID: number,
     viewState: any,
@@ -4646,10 +5440,16 @@ export class SplitViewFactory {
     // Mark as cleaning up to prevent further operations
     state.isCleaningUp = true;
 
-    // Unload browsers FIRST to prevent dead object errors from callbacks
-    // This stops the internal readers from firing more callbacks
     const leftBrowser = state.leftBrowser;
     const rightBrowser = state.rightBrowser;
+
+    // Stop active Read Aloud before unloading embedded readers.
+    this.pauseReadAloudInBrowser(leftBrowser, true);
+    this.pauseReadAloudInBrowser(rightBrowser, true);
+    this.setSplitTabAudioStatus(tabID, { active: false, paused: false });
+
+    // Unload browsers FIRST to prevent dead object errors from callbacks
+    // This stops the internal readers from firing more callbacks
     this.unloadBrowser(leftBrowser);
     this.unloadBrowser(rightBrowser);
 
