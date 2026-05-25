@@ -7,7 +7,7 @@
 
 ---
 
-**Split-View Reader** is a plugin for [Zotero 8](https://www.zotero.org/) that enables split-view reading same or different PDFs with optional primary-view action sync.
+**Split-View Reader** is a plugin for [Zotero 8/9](https://www.zotero.org/) that enables split-view reading same or different PDFs with optional primary-view action sync.
 
 <p align="center">
   <img src="doc/example.png" width="1500" alt="Example" />
