@@ -23,6 +23,11 @@ interface TrackedEventListener {
   options?: boolean | AddEventListenerOptions;
 }
 
+interface ToolbarCloseObserver {
+  side: "left" | "right";
+  observer: MutationObserver;
+}
+
 interface SplitTabState {
   tabID: string;
   container: XUL.Box;
@@ -51,6 +56,7 @@ interface SplitTabState {
   // Resource tracking for proper cleanup
   eventListeners: TrackedEventListener[];
   timeoutIds: number[];
+  toolbarCloseObservers: ToolbarCloseObserver[];
   // Cached viewer containers to avoid repeated DOM queries
   leftViewerContainer: Element | null;
   rightViewerContainer: Element | null;
@@ -2919,6 +2925,7 @@ export class SplitViewFactory {
       zoomingCount: 0,
       eventListeners: [],
       timeoutIds: [],
+      toolbarCloseObservers: [],
       leftViewerContainer: null,
       rightViewerContainer: null,
       splitRatio: 0.5,
@@ -3254,6 +3261,7 @@ export class SplitViewFactory {
       zoomingCount: 0,
       eventListeners: [],
       timeoutIds: [],
+      toolbarCloseObservers: [],
       leftViewerContainer: null,
       rightViewerContainer: null,
       splitRatio: 0.5,
@@ -4183,6 +4191,8 @@ export class SplitViewFactory {
     // Wait for internal reader to be ready
     await this.waitForInternalReader(browser);
 
+    this.installToolbarCloseButton(tabID, browser, isRight ? "right" : "left");
+
     // Only hide the reader's internal sidenav on the LEFT browser
     // The RIGHT browser keeps its toggle button to control the global context pane
     if (!isRight) {
@@ -4194,6 +4204,113 @@ export class SplitViewFactory {
       // content compartment so flushSync() works correctly, producing a smooth transition
       // without flicker when the toggle button appears/disappears.
       this.injectContextPaneHandler(browser);
+    }
+  }
+
+  /**
+   * Add a close button to the reader toolbar for this split-view side.
+   */
+  private static installToolbarCloseButton(
+    tabID: string,
+    browser: XULBrowserElement,
+    side: "left" | "right",
+  ) {
+    const state = this.stateMap.get(tabID);
+    if (!state || state.isCleaningUp || !this.isBrowserAlive(browser)) return;
+
+    try {
+      state.toolbarCloseObservers = state.toolbarCloseObservers.filter(
+        (entry) => {
+          if (entry.side !== side) return true;
+          try {
+            entry.observer.disconnect();
+          } catch {
+            // Ignore observers from an already-unloaded browser
+          }
+          return false;
+        },
+      );
+
+      const win = browser.contentWindow;
+      if (!win) return;
+      const wrappedWin = (win as any).wrappedJSObject || win;
+      const doc = wrappedWin.document as Document | undefined;
+      if (!doc) return;
+
+      const buttonID = `split-view-close-${side}`;
+      // eslint-disable-next-line @typescript-eslint/no-this-alias
+      const self = this;
+
+      const addButton = () => {
+        const currentState = self.stateMap.get(tabID);
+        if (!currentState || currentState.isCleaningUp) return;
+        if (doc.getElementById(buttonID)) return;
+
+        const findButton = doc.querySelector(
+          ".toolbar .end .toolbar-button.find",
+        );
+        if (!findButton?.parentNode) return;
+
+        const button = doc.createElement("button");
+        button.id = buttonID;
+        button.className = "toolbar-button split-view-close-button";
+        button.setAttribute("type", "button");
+        button.setAttribute("tabindex", "-1");
+        button.setAttribute("title", this.getCloseViewMenuLabel());
+        button.setAttribute("aria-label", this.getCloseViewMenuLabel());
+
+        button.innerHTML = `
+          <svg class="split-view-close-icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M11.2923 12L12 11.292L8.70711 7.99999L12 4.70796L11.2922 4L8.00011 7.29299L4.70798 4L4 4.70774L7.29311 7.99999L4 11.2922L4.70796 12L8.00011 8.70699L11.2923 12Z" fill="currentColor"></path>
+          </svg>
+        `;
+
+        button.addEventListener("mousedown", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+        });
+        button.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          void self.revertToSingleReader(tabID, side);
+        });
+
+        findButton.after(button);
+      };
+
+      const injectStyle = () => {
+        if (doc.getElementById("split-view-close-button-style")) return;
+        const style = doc.createElement("style");
+        style.id = "split-view-close-button-style";
+        style.textContent = `
+          .toolbar-button.split-view-close-button {
+            flex: 0 0 28px;
+            color: var(--fill-secondary);
+          }
+
+          .toolbar-button.split-view-close-button .split-view-close-icon {
+            width: 16px;
+            height: 16px;
+            display: block;
+            pointer-events: none;
+          }
+        `;
+        doc.head?.appendChild(style);
+      };
+
+      injectStyle();
+      addButton();
+
+      const observer = new win.MutationObserver(() => addButton());
+      const observerTarget =
+        doc.getElementById("reader-ui") || doc.documentElement;
+      observer.observe(observerTarget, {
+        childList: true,
+        subtree: true,
+      });
+      state.toolbarCloseObservers.push({ side, observer });
+    } catch (e) {
+      Zotero.debug(`Split view: installToolbarCloseButton failed: ${e}`);
     }
   }
 
@@ -5580,6 +5697,7 @@ export class SplitViewFactory {
     // Store references before removing from map
     const eventListeners = [...state.eventListeners];
     const timeoutIds = [...state.timeoutIds];
+    const toolbarCloseObservers = [...state.toolbarCloseObservers];
     const sidebarToggleTimers = [...state.sidebarToggleTimers];
     const resizeTimerId = state.resizeTimerId;
     const annotationNotifierID = state.annotationNotifierID;
@@ -5589,6 +5707,7 @@ export class SplitViewFactory {
     // Clear state arrays first to prevent re-entry
     state.eventListeners = [];
     state.timeoutIds = [];
+    state.toolbarCloseObservers = [];
     state.sidebarToggleTimers = [];
     state.leftViewerContainer = null;
     state.rightViewerContainer = null;
@@ -5632,6 +5751,17 @@ export class SplitViewFactory {
       } catch (e) {
         Zotero.debug(
           `Split view: cleanup ${tabID} - removeEventListener(${type}) failed: ${e}`,
+        );
+      }
+    }
+
+    // Disconnect toolbar close button observers
+    for (const { observer } of toolbarCloseObservers) {
+      try {
+        observer.disconnect();
+      } catch (e) {
+        Zotero.debug(
+          `Split view: cleanup ${tabID} - toolbar observer disconnect failed: ${e}`,
         );
       }
     }
