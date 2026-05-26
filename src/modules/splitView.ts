@@ -3363,9 +3363,6 @@ export class SplitViewFactory {
       // Set up selection sync for same PDF
       this.setupSelectionSync(tabID);
 
-      // Hide secondary toolbar (optional, since they share annotations)
-      this.hideSecondaryToolbar(tabID);
-
       // Finish split-view setup after both readers initialize
       this.trackTimeout(
         newState,
@@ -3479,34 +3476,6 @@ export class SplitViewFactory {
 
     setupObserver(state.leftBrowser, true);
     setupObserver(state.rightBrowser, false);
-  }
-
-  /**
-   * Hide the secondary (right) toolbar in same PDF split view
-   * Since both views show the same PDF, we only need one toolbar
-   */
-  private static hideSecondaryToolbar(tabID: string) {
-    const state = this.stateMap.get(tabID);
-    if (!state || !state.isSamePDF) return;
-
-    try {
-      const rightReader = this.getInternalReaderFromBrowser(state.rightBrowser);
-      if (!rightReader?._primaryView) return;
-
-      const iframeWindow = rightReader._primaryView._iframeWindow;
-      if (!iframeWindow) return;
-
-      const doc = iframeWindow.document;
-      if (!doc) return;
-
-      // Try to find and hide the toolbar
-      const toolbar = doc.querySelector(".toolbar");
-      if (toolbar) {
-        (toolbar as HTMLElement).style.display = "none";
-      }
-    } catch {
-      // Ignore errors
-    }
   }
 
   /**
