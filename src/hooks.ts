@@ -23,6 +23,7 @@ async function onStartup() {
   SplitViewFactory.registerSessionRestore();
   SplitViewFactory.registerTabLookup();
   SplitViewFactory.registerPrefObservers();
+  SplitViewFactory.registerSplitTabTitleItemNotifier();
   SplitViewFactory.registerPromptCommands();
 
   BasicExampleFactory.registerPrefs();

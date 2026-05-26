@@ -109,6 +109,8 @@ export class SplitViewFactory {
   ];
   /** Preference observer ID for split tab titles - renames open split view tabs */
   private static splitTabsTitlePrefObserverID: symbol | null = null;
+  /** Item notifier ID for split tab title updates when either side's item changes */
+  private static splitTabTitleItemNotifierID: string | null = null;
   /** Preference observer ID for Read Aloud voices - updates open split readers */
   private static readAloudVoicesPrefObserverID: symbol | null = null;
   /** Original IOUtils.writeJSON before installing the Read Aloud enabled voices hook */
@@ -726,6 +728,63 @@ export class SplitViewFactory {
    */
   static refreshOpenSplitViewTabTitles(): void {
     void this.renameAllSplitViewTabs();
+  }
+
+  /**
+   * Refresh split-view tab titles affected by item changes.
+   * Zotero's native tab title observer only checks tab.data.itemID, which is
+   * the left-side item for split tabs, so right-side attachment/parent changes
+   * need to be handled by this plugin.
+   */
+  private static async renameSplitViewTabsForChangedItems(
+    ids: (string | number)[],
+  ): Promise<void> {
+    const changedItemIDs = new Set(
+      ids.map((id) => Number(id)).filter((id) => Number.isInteger(id)),
+    );
+    if (!changedItemIDs.size) return;
+
+    for (const [tabID, state] of this.stateMap.entries()) {
+      if (state.isCleaningUp) continue;
+      if (
+        changedItemIDs.has(state.leftItemID) ||
+        changedItemIDs.has(state.rightItemID) ||
+        changedItemIDs.has(state.leftParentItemID) ||
+        changedItemIDs.has(state.rightParentItemID)
+      ) {
+        await this.renameSplitViewTab(tabID);
+      }
+    }
+  }
+
+  /**
+   * Register an item observer to keep split tab titles in sync for both panes.
+   */
+  static registerSplitTabTitleItemNotifier() {
+    if (this.splitTabTitleItemNotifierID) return;
+
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const self = this;
+    const notifierCallback = {
+      notify: (
+        action: string,
+        type: string,
+        ids: (string | number)[],
+        _extraData: any,
+      ) => {
+        if (type !== "item") return;
+        if (action !== "modify" && action !== "refresh") return;
+
+        void self.renameSplitViewTabsForChangedItems(ids);
+      },
+    };
+
+    this.splitTabTitleItemNotifierID = Zotero.Notifier.registerObserver(
+      notifierCallback,
+      ["item"],
+      "splitViewTabTitle",
+      30,
+    );
   }
 
   /**
@@ -1757,6 +1816,16 @@ export class SplitViewFactory {
         );
       }
       this.splitTabsTitlePrefObserverID = null;
+    }
+    if (this.splitTabTitleItemNotifierID) {
+      try {
+        Zotero.Notifier.unregisterObserver(this.splitTabTitleItemNotifierID);
+      } catch (e) {
+        Zotero.debug(
+          `Split view: unregisterAll - unregisterObserver(splitTabTitleItem) failed: ${e}`,
+        );
+      }
+      this.splitTabTitleItemNotifierID = null;
     }
     if (this.readAloudVoicesPrefObserverID) {
       try {
