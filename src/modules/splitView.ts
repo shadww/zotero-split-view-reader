@@ -109,6 +109,18 @@ export class SplitViewFactory {
   private static originalIOUtilsWriteJSON: any = null;
   /** Read Aloud first-run dialog is global per voice language, even when two split readers initialize together. */
   private static readAloudFirstRunDialogLangs: Set<string> = new Set();
+  /** Last tab that opened Zotero's tab context menu. */
+  private static tabShowInLibraryContext: {
+    tabID: string;
+    openedAt: number;
+    popup?: Element;
+  } | null = null;
+  private static tabShowInLibraryHandlers: {
+    contextmenu: EventListener;
+    popupshowing: EventListener;
+    popuphidden: EventListener;
+  } | null = null;
+  private static tabShowInLibraryDocument: Document | null = null;
 
   private static getReadAloudEnabledVoicesPath(): string | null {
     try {
@@ -473,6 +485,146 @@ export class SplitViewFactory {
     if (!tabID) return false;
     const state = this.stateMap.get(tabID);
     return !!state && !state.isCleaningUp;
+  }
+
+  private static getActiveParentItemID(state: SplitTabState): number {
+    return state.activeSide === "left"
+      ? state.leftParentItemID
+      : state.rightParentItemID;
+  }
+
+  private static getActiveItemID(state: SplitTabState): number {
+    return state.activeSide === "left" ? state.leftItemID : state.rightItemID;
+  }
+
+  private static installTabShowInLibraryHandler(win: Window): void {
+    if (this.tabShowInLibraryHandlers) return;
+
+    const document = win.document;
+    const showInLibraryLabel = Zotero.getString("general.showInLibrary");
+    const moveTabLabel = Zotero.getString("tabs.move");
+
+    const contextmenu = ((event: Event) => {
+      const target = event.target as Element | null;
+      const tab = target?.closest?.(
+        "#tab-bar-container .tab[data-id]",
+      ) as Element | null;
+      const tabID = tab?.getAttribute("data-id");
+      this.tabShowInLibraryContext = tabID
+        ? { tabID, openedAt: Date.now() }
+        : null;
+    }) as EventListener;
+
+    const popupshowing = ((event: Event) => {
+      const popup = event.target as Element | null;
+      if (!popup || popup.localName !== "menupopup") return;
+
+      try {
+        const context = this.tabShowInLibraryContext;
+        if (!context || Date.now() - context.openedAt >= 5000) return;
+
+        const state = this.stateMap.get(context.tabID);
+        if (!state || state.isCleaningUp) return;
+        const tab = (win as any).Zotero_Tabs?._getTab?.(context.tabID)?.tab;
+        if (!tab?.data?.isSplitView) return;
+
+        // Zotero's tab context menu is a temporary top-level popup whose direct
+        // children start with “Show in Library” and the “Move Tab” submenu. Avoid
+        // scanning descendants or unrelated popups that may contain the same label.
+        const popupset = document.querySelector("popupset");
+        if (popup.parentElement !== popupset) return;
+
+        const children = Array.from(popup.children) as Element[];
+        const showInLibraryItem = children.find(
+          (child) =>
+            child.localName === "menuitem" &&
+            child.getAttribute("label") === showInLibraryLabel,
+        );
+        const hasMoveTabMenu = children.some(
+          (child) =>
+            child.localName === "menu" &&
+            child.getAttribute("label") === moveTabLabel,
+        );
+        if (!showInLibraryItem || !hasMoveTabMenu) return;
+
+        const contextTabID = context.tabID;
+        context.popup = popup;
+
+        const replacement = showInLibraryItem.cloneNode(true) as Element;
+        replacement.addEventListener("command", (commandEvent: Event) => {
+          commandEvent.preventDefault();
+          commandEvent.stopPropagation();
+          commandEvent.stopImmediatePropagation();
+
+          const currentState = this.stateMap.get(contextTabID);
+          if (!currentState || currentState.isCleaningUp) return;
+          const currentTab = (win as any).Zotero_Tabs?._getTab?.(
+            contextTabID,
+          )?.tab;
+          if (!currentTab?.data?.isSplitView) return;
+
+          let itemID = this.getActiveItemID(currentState);
+          const item = Zotero.Items.get(itemID);
+          if (item?.parentItemID) {
+            itemID = item.parentItemID;
+          }
+          const pane = (win as any).ZoteroPane_Local || (win as any).ZoteroPane;
+          if (typeof pane?.selectItem === "function") {
+            void pane.selectItem(itemID);
+          }
+        });
+        showInLibraryItem.replaceWith(replacement);
+      } catch {
+        // Ignore popup decoration errors
+      }
+    }) as EventListener;
+
+    const popuphidden = ((event: Event) => {
+      const target = event.target as Element | null;
+      const context = this.tabShowInLibraryContext;
+      if (target?.localName === "menupopup" && context?.popup === target) {
+        this.tabShowInLibraryContext = null;
+      }
+    }) as EventListener;
+
+    document.addEventListener("contextmenu", contextmenu, true);
+    document.addEventListener("popupshowing", popupshowing, true);
+    document.addEventListener("popuphidden", popuphidden, true);
+    this.tabShowInLibraryDocument = document;
+    this.tabShowInLibraryHandlers = {
+      contextmenu,
+      popupshowing,
+      popuphidden,
+    };
+  }
+
+  private static uninstallTabShowInLibraryHandler(): void {
+    try {
+      const document = this.tabShowInLibraryDocument;
+      if (document && this.tabShowInLibraryHandlers) {
+        document.removeEventListener(
+          "contextmenu",
+          this.tabShowInLibraryHandlers.contextmenu,
+          true,
+        );
+        document.removeEventListener(
+          "popupshowing",
+          this.tabShowInLibraryHandlers.popupshowing,
+          true,
+        );
+        document.removeEventListener(
+          "popuphidden",
+          this.tabShowInLibraryHandlers.popuphidden,
+          true,
+        );
+      }
+    } catch (e) {
+      Zotero.debug(`Split view: uninstallTabShowInLibraryHandler failed: ${e}`);
+    } finally {
+      this.tabShowInLibraryContext = null;
+      this.tabShowInLibraryHandlers = null;
+      this.tabShowInLibraryDocument = null;
+    }
   }
 
   /**
@@ -1254,6 +1406,7 @@ export class SplitViewFactory {
       (Zotero_Tabs as any)._originalSetAudioStatusForSplitView =
         Zotero_Tabs.setAudioStatus;
     }
+    this.installTabShowInLibraryHandler(win);
 
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;
@@ -1663,6 +1816,8 @@ export class SplitViewFactory {
       }
     } catch (e) {
       Zotero.debug(`Split view: unregisterTabLookup failed: ${e}`);
+    } finally {
+      this.uninstallTabShowInLibraryHandler();
     }
   }
 
@@ -6566,10 +6721,7 @@ export class SplitViewFactory {
             win.document.documentElement?.classList.add("split-view-active");
             self.showContextPaneForSplitView(win);
             // Update context pane content to show the active side's item
-            const parentItemID =
-              selectedState.activeSide === "left"
-                ? selectedState.leftParentItemID
-                : selectedState.rightParentItemID;
+            const parentItemID = self.getActiveParentItemID(selectedState);
             self.updateContextPane(selectedTabID, win, parentItemID);
           } else {
             // This tab has no split view - remove CSS class
