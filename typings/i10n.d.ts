@@ -16,6 +16,8 @@ export type FluentMessageId =
   | 'pref-about-desc'
   | 'pref-follow-focus'
   | 'pref-follow-focus-desc'
+  | 'pref-remember-split-ratio'
+  | 'pref-remember-split-ratio-desc'
   | 'pref-scrollbar-color'
   | 'pref-scrollbar-color-desc'
   | 'pref-section-about'

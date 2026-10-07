@@ -12,6 +12,8 @@ declare namespace _ZoteroTypes {
       "primaryScrollbarR": number;
       "primaryScrollbarG": number;
       "primaryScrollbarB": number;
+      "rememberSplitRatio": boolean;
+      "documentSplitRatios": string;
     };
   }
 }

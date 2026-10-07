@@ -78,6 +78,15 @@ function bindPrefEvents() {
     setPref("followFocusPrimary", target.checked);
   });
 
+  // Checkbox: Remember split ratio per document
+  const rememberSplitRatioCheckbox = doc.querySelector(
+    `#zotero-prefpane-${config.addonRef}-remember-split-ratio`,
+  ) as HTMLInputElement | null;
+  rememberSplitRatioCheckbox?.addEventListener("command", (e: Event) => {
+    const target = e.target as HTMLInputElement;
+    setPref("rememberSplitRatio", target.checked);
+  });
+
   const splitTabsTitleMenulist = doc.querySelector(
     `#zotero-prefpane-${config.addonRef}-split-tabs-title`,
   ) as (Element & { value: SplitTabsTitleMode }) | null;

@@ -1,6 +1,6 @@
 import { config } from "../../package.json";
 import { getString } from "../utils/locale";
-import { clearPref, getPref } from "../utils/prefs";
+import { clearPref, getPref, setPref } from "../utils/prefs";
 import {
   getSplitViewTabTitleForItems,
   type SplitTabsTitleMode,
@@ -849,7 +849,89 @@ export class SplitViewFactory {
   }
 
   private static getDefaultPrimarySide(): "left" | "right" | null {
-    return "left";
+    return null;
+  }
+
+  // Cap on how many remembered document-pair ratios we keep, to avoid the
+  // preference growing unbounded for heavy users. Oldest entries (by
+  // insertion order) are evicted first.
+  private static readonly MAX_REMEMBERED_SPLIT_RATIOS = 300;
+
+  /**
+   * Build a stable, order-independent key identifying a document pair for
+   * the purpose of remembering split ratio. Same-PDF split views use a
+   * distinct namespace so they never collide with a different-PDF split
+   * view that happens to reuse one of the same item IDs.
+   */
+  private static getSplitRatioKey(
+    leftItemID: number,
+    rightItemID: number,
+    isSamePDF: boolean,
+  ): string {
+    if (isSamePDF) {
+      return `same:${leftItemID}`;
+    }
+    const [a, b] = [leftItemID, rightItemID].sort((x, y) => x - y);
+    return `pair:${a}-${b}`;
+  }
+
+  private static readDocumentSplitRatios(): Record<string, number> {
+    try {
+      const raw = getPref("documentSplitRatios");
+      const parsed = JSON.parse(raw || "{}");
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * Look up the remembered split ratio for a document pair, if any and if
+   * the feature is enabled. Returns null when there is nothing to restore.
+   */
+  private static getRememberedSplitRatio(
+    leftItemID: number,
+    rightItemID: number,
+    isSamePDF: boolean,
+  ): number | null {
+    if (getPref("rememberSplitRatio") === false) return null;
+    const key = this.getSplitRatioKey(leftItemID, rightItemID, isSamePDF);
+    const ratios = this.readDocumentSplitRatios();
+    const value = ratios[key];
+    return typeof value === "number" && value > 0 && value < 1 ? value : null;
+  }
+
+  /**
+   * Persist the current split ratio for a document pair so it can be
+   * restored the next time these documents are opened in a split view.
+   */
+  private static saveRememberedSplitRatio(
+    leftItemID: number,
+    rightItemID: number,
+    isSamePDF: boolean,
+    ratio: number,
+  ): void {
+    if (getPref("rememberSplitRatio") === false) return;
+    if (!(typeof ratio === "number" && ratio > 0 && ratio < 1)) return;
+    try {
+      const key = this.getSplitRatioKey(leftItemID, rightItemID, isSamePDF);
+      const ratios = this.readDocumentSplitRatios();
+      ratios[key] = ratio;
+
+      const keys = Object.keys(ratios);
+      if (keys.length > this.MAX_REMEMBERED_SPLIT_RATIOS) {
+        // Evict oldest entries (plain objects preserve string-key
+        // insertion order) until back under the cap.
+        const excess = keys.length - this.MAX_REMEMBERED_SPLIT_RATIOS;
+        for (let i = 0; i < excess; i++) {
+          delete ratios[keys[i]];
+        }
+      }
+
+      setPref("documentSplitRatios", JSON.stringify(ratios));
+    } catch (e) {
+      Zotero.debug(`Split view: Failed to save remembered split ratio: ${e}`);
+    }
   }
 
   private static getPrimaryMenuConfig(
@@ -1171,6 +1253,12 @@ export class SplitViewFactory {
       const s = self.stateMap.get(tabID);
       if (s && !s.isCleaningUp) {
         self.updateTabDataForSession(tabID);
+        self.saveRememberedSplitRatio(
+          s.leftItemID,
+          s.rightItemID,
+          s.isSamePDF,
+          s.splitRatio,
+        );
       }
       removeOverlay();
     };
@@ -2997,7 +3085,8 @@ export class SplitViewFactory {
       toolbarCloseObservers: [],
       leftViewerContainer: null,
       rightViewerContainer: null,
-      splitRatio: 0.5,
+      splitRatio:
+        this.getRememberedSplitRatio(leftItemID, secondaryPDF.id, false) ?? 0.5,
       leftViewState: leftViewState,
       rightViewState: rightViewState,
       isCleaningUp: false,
@@ -3333,7 +3422,7 @@ export class SplitViewFactory {
       toolbarCloseObservers: [],
       leftViewerContainer: null,
       rightViewerContainer: null,
-      splitRatio: 0.5,
+      splitRatio: this.getRememberedSplitRatio(itemID, itemID, true) ?? 0.5,
       leftViewState: leftViewState,
       rightViewState: leftViewState, // Start at same position as left side
       isCleaningUp: false,
